@@ -68,19 +68,51 @@ final class ServerManager {
         }
     }
 
-    /// 重启：先停再起。
+    /// 重启：彻底重启 — 停自己的进程、等待端口释放、
+    /// 清理占用端口的残留进程，然后启动新服务（保证插件/配置变更生效）。
     func restart() {
         stop()
-        if case .failed = state {} // 保留错误上下文
         state = .starting
-        log("[dsh-web] 重新启动…")
+        log("[dsh-web] 重新启动（彻底重启，加载最新配置）…")
         Task {
-            if await probePort(port) {
-                state = .external(port: port)
-                log("[dsh-web] 检测到 127.0.0.1:\(port) 已有服务在运行，直接连接。")
-            } else {
-                launchServer()
+            // 1. 等待自己终止的进程释放端口（最多 5s）
+            for _ in 0..<25 {
+                if !(await probePort(port)) { break }
+                try? await Task.sleep(for: .milliseconds(200))
             }
+            // 2. 端口仍被占用 → 是外部残留进程，接管并清理
+            if await probePort(port) {
+                log("[dsh-web] 端口 \(port) 被残留进程占用，清理后重启…")
+                killPortOwner(port)
+                for _ in 0..<15 {
+                    if !(await probePort(port)) { break }
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
+            }
+            launchServer()
+        }
+    }
+
+    /// 杀掉占用指定端口的进程（lsof 定位 PID）。
+    private func killPortOwner(_ port: Int) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
+        task.arguments = ["-tiTCP:\(port)", "-sTCP:LISTEN"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: data, encoding: .utf8) else { return }
+            let pids = output.split(whereSeparator: \.isNewline).compactMap { Int($0) }
+            for pid in pids where pid > 1 {
+                log("[dsh-web] 终止残留进程 PID \(pid)")
+                kill(pid_t(pid), SIGTERM)
+            }
+        } catch {
+            log("[dsh-web] 清理端口失败: \(error.localizedDescription)")
         }
     }
 
@@ -94,7 +126,13 @@ final class ServerManager {
         }
         log("[dsh-web] 使用 Node: \(node.path)")
         Task {
-            let ok = await ensurePackage(node: node)
+            // 优化：缓存里已有 dsh 启动入口时直接使用，跳过 npx 网络检查（省 3-5s）
+            if let boot = self.resolveBootJS() {
+                self.spawnServer(node: node, bootJS: boot)
+                return
+            }
+            log("[dsh-web] 未找到 dsh 缓存，先通过 npx 安装…")
+            let ok = await self.ensurePackage(node: node)
             guard ok else { return } // fail 已由 ensurePackage 处理
             guard let boot = self.resolveBootJS() else {
                 self.fail("已安装 @deepseek-ai/dsh 但找不到启动入口，请检查 ~/.npm/_npx 缓存。")
@@ -170,16 +208,22 @@ final class ServerManager {
         process = p
         log("[dsh-web] 服务进程已启动 (PID \(p.processIdentifier))")
 
-        // 兜底：60s 内未出现就绪行则探测端口
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
-            guard let self, self.process === p, case .starting = self.state else { return }
-            Task {
+        // 快速就绪：端口可连接即视为就绪（不等 dsh 的完整初始化就绪行，
+        // 那要 20-30s；页面由 dsh 前端自己的 loading 处理）。最多等 90s。
+        Task { [weak self] in
+            guard let self else { return }
+            let deadline = Date().addingTimeInterval(90)
+            while self.process === p, case .starting = self.state {
                 if await self.probePort(self.port) {
                     self.state = .running(port: self.port)
-                    self.log("[dsh-web] 端口探测确认服务就绪。")
-                } else {
-                    self.fail("服务启动 60s 未就绪，详见日志。")
+                    self.log("[dsh-web] 服务已就绪（端口探测）。")
+                    return
                 }
+                if Date() > deadline {
+                    self.fail("服务启动 90s 未就绪，详见日志。")
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(300))
             }
         }
     }
