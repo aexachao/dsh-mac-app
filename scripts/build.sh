@@ -25,6 +25,7 @@ done
 
 echo "==> merging architectures"
 if [ "${#BINS[@]}" -gt 1 ]; then
+  mkdir -p .build/release
   lipo -create "${BINS[@]}" -output .build/release/DSHWeb-universal
   BIN=".build/release/DSHWeb-universal"
 else
