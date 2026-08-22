@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build universal Harness.app and publish release
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build universal app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ github.run_number }}
+          NO_INSTALL: '1'
+        run: |
+          ./scripts/build.sh
+          cd dist
+          ditto -c -k --keepParent "Harness.app" "Harness-${{ steps.version.outputs.version }}-macos-universal.zip"
+          shasum -a 256 "Harness-${{ steps.version.outputs.version }}-macos-universal.zip" > SHA256SUMS.txt
+
+      - name: Extract changelog entry for this version
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # 取 CHANGELOG.md 中该版本条目（到下一个 ## 为止）
+          awk -v v="## [$VERSION]" 'index($0, v)==1 {f=1; next} f && /^## / {f=0} f {print}' CHANGELOG.md > /tmp/notes-body.md
+          # 附加提交列表（上一 tag 至今）
+          echo "" >> /tmp/notes-body.md
+          echo "### Commits" >> /tmp/notes-body.md
+          PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          if [ -n "$PREV" ]; then
+            git log --oneline --no-merges "$PREV..HEAD" | sed 's/^/- /' >> /tmp/notes-body.md
+          else
+            git log --oneline --no-merges | sed 's/^/- /' >> /tmp/notes-body.md
+          fi
+
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "Harness-${{ steps.version.outputs.version }}-macos-universal.zip" \
+            SHA256SUMS.txt \
+            --title "Harness ${{ steps.version.outputs.version }}" \
+            --notes-file /tmp/notes-body.md

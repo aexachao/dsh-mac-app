@@ -1,31 +1,53 @@
 #!/bin/bash
-# 构建 DSH Web.app：编译 → 组装包结构 → 签名 → 安装到 ~/Applications
+# 构建 Harness.app：编译（默认 universal 双架构）→ 组装包结构 → 签名 → 安装
+#
+# 环境变量：
+#   VERSION  版本号（默认 0.2.0；Release 构建时由 CI 从 tag 注入）
+#   BUILD    构建号（默认 1；CI 传入 git 计数）
+#   ARCHS    架构列表（默认 "arm64 x86_64"，单架构可传 ARCHS=arm64）
+#   NO_INSTALL=1  跳过安装到 ~/Applications（CI 用）
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NAME="Harness"
+VERSION="${VERSION:-0.2.0}"
+BUILD="${BUILD:-1}"
+ARCHS="${ARCHS:-arm64 x86_64}"
 APP="dist/$NAME.app"
-DEST="$HOME/Applications/$NAME.app"
 
-echo "==> swift build (release)"
-swift build -c release --product DSHWeb
+echo "==> swift build (release, archs: $ARCHS)"
+BINS=()
+for arch in $ARCHS; do
+  echo "   - building $arch (scratch: .build-$arch)"
+  swift build -c release --product DSHWeb --scratch-path ".build-$arch" --arch "$arch"
+  BINS+=(.build-$arch/release/DSHWeb)
+done
 
-echo "==> assembling $APP"
+echo "==> merging architectures"
+if [ "${#BINS[@]}" -gt 1 ]; then
+  lipo -create "${BINS[@]}" -output .build/release/DSHWeb-universal
+  BIN=".build/release/DSHWeb-universal"
+else
+  BIN="${BINS[0]}"
+fi
+lipo -info "$BIN"
+
+echo "==> assembling $APP (v$VERSION build $BUILD)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/DSHWeb "$APP/Contents/MacOS/DSHWeb"
+cp "$BIN" "$APP/Contents/MacOS/DSHWeb"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Harness</string>
+	<string>$NAME</string>
 	<key>CFBundleDisplayName</key>
-	<string>Harness</string>
+	<string>$NAME</string>
 	<key>CFBundleIdentifier</key>
 	<string>local.harness.app</string>
 	<key>CFBundleIconFile</key>
@@ -35,9 +57,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>$VERSION</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$BUILD</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSApplicationCategoryType</key>
@@ -56,8 +78,12 @@ PLIST
 echo "==> codesign (ad-hoc)"
 codesign --force --deep --sign - "$APP"
 
-echo "==> installing to $DEST"
-rm -rf "$DEST"
-cp -R "$APP" "$DEST"
-
-echo "==> done: $DEST"
+if [ "${NO_INSTALL:-}" != "1" ]; then
+  DEST="$HOME/Applications/$NAME.app"
+  echo "==> installing to $DEST"
+  rm -rf "$DEST"
+  cp -R "$APP" "$DEST"
+  echo "==> done: $DEST"
+else
+  echo "==> done (no install): $APP"
+fi

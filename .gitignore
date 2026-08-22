@@ -8,3 +8,5 @@ DerivedData/
 
 # SwiftPM
 .swiftpm/
+.build-arm64/
+.build-x86_64/
