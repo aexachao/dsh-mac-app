@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "DSHWeb",
             path: "Sources/DSHWeb"
+        ),
+        .testTarget(
+            name: "DSHWebTests",
+            dependencies: ["DSHWeb"],
+            path: "Tests/DSHWebTests"
         )
     ]
 )

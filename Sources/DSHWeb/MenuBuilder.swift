@@ -1,0 +1,267 @@
+import AppKit
+import OSLog
+import SwiftUI
+
+private let menuLog = Logger(subsystem: "local.harness.app", category: "menu")
+
+/// 菜单语言偏好（设置中切换；存储于 UserDefaults）。
+/// 默认简体中文；同时同步到 dsh 服务的界面语言。
+enum AppLanguage: String, CaseIterable {
+    case zh = "zh"
+    case en = "en"
+}
+
+/// 手动构建整个主菜单栏（中文/英文两套），
+/// 完全控制菜单标题与文案（SwiftUI 无法改写系统菜单标题）。
+enum MenuBuilder {
+
+    static var current: AppLanguage {
+        AppLanguage(rawValue: UserDefaults.standard.string(forKey: "appLanguage") ?? "") ?? .zh
+    }
+
+    @MainActor static func applyLanguage(_ language: AppLanguage) {
+        UserDefaults.standard.set(language.rawValue, forKey: "appLanguage")
+        rebuild()
+    }
+
+    /// 把语言偏好写入 dsh 的 settings.yaml（locale.preference）。
+    /// nodePath / settingsPath / yamlPath 可注入（测试用临时文件 + 真实 yaml 模块）。
+    static func writeLocalePreference(nodePath: String, settingsPath: String, yamlPath: String, language: AppLanguage) {
+        let script = "const fs=require('fs');const YAML=require('" + yamlPath + "');" +
+            "const p='" + settingsPath + "';" +
+            "const doc=YAML.parseDocument(fs.readFileSync(p,'utf8'));" +
+            "doc.setIn(['locale','preference'],'" + language.rawValue + "');" +
+            "fs.writeFileSync(p,doc.toString());"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: nodePath)
+        task.arguments = ["-e", script]
+        try? task.run()
+        task.waitUntilExit()
+    }
+
+    /// 解析 node 路径（与服务一致：nvm 最新 → Homebrew → /usr/local）。
+    static func resolveNodePath(home: String = NSHomeDirectory()) -> String {
+        var nodePath = "/usr/local/bin/node"
+        if let nvm = try? FileManager.default.contentsOfDirectory(
+            at: URL(fileURLWithPath: home + "/.nvm/versions/node"),
+            includingPropertiesForKeys: nil
+        ).sorted(by: { $0.path > $1.path }).first {
+            nodePath = nvm.appendingPathComponent("bin/node").path
+        } else if FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/node") {
+            nodePath = "/opt/homebrew/bin/node"
+        }
+        return nodePath
+    }
+
+    /// 当前构建的菜单（守护 Timer 用它判断是否被覆盖）。
+    private nonisolated(unsafe) static var lastMenu: NSMenu?
+
+    /// 诊断：把当前 mainMenu 结构追加到文件（验证菜单是否被覆盖）。
+    @MainActor static func dumpMenuState(_ tag: String) {
+        let lines = NSApp.mainMenu?.items.compactMap { item -> String? in
+            let subs = item.submenu?.items.compactMap { $0.title.isEmpty ? nil : $0.title }.joined(separator: "|") ?? ""
+            return "\(item.title): \(subs)"
+        }.joined(separator: "\n") ?? "nil"
+        let text = "=== \(tag) ===\n\(lines ?? "nil")\n"
+        if let data = text.data(using: .utf8) {
+            if let fh = FileHandle(forWritingAtPath: "/tmp/menu-state.log") {
+                fh.seekToEndOfFile()
+                fh.write(data)
+                try? fh.close()
+            } else {
+                try? text.write(toFile: "/tmp/menu-state.log", atomically: true, encoding: .utf8)
+            }
+        }
+    }
+
+    @MainActor static func rebuild() {
+
+        // 立即设置 + 延迟再设一次：SwiftUI 可能在渲染周期/激活时
+        // 重建默认菜单，双设置覆盖两种时序。
+        let menu = buildMenu(language: current)
+        lastMenu = menu
+        NSApp.mainMenu = menu
+        dumpMenuState("rebuild-set")
+        DispatchQueue.main.async { [self] in
+            guard lastMenu !== NSApp.mainMenu else { return }
+            let menu = buildMenu(language: current)
+            lastMenu = menu
+            NSApp.mainMenu = menu
+            dumpMenuState("rebuild-delayed")
+        }
+    }
+
+    /// 守护：周期性检查菜单是否被 SwiftUI 覆盖，是则恢复。
+    @MainActor static func startGuard() {
+        menuLog.info("guard started")
+        var tick = 0
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                if let lastMenu, NSApp.mainMenu !== lastMenu {
+                    menuLog.info("guard: menu overridden, rebuilding")
+                    dumpMenuState("guard-override")
+                    rebuild()
+                }
+                tick += 1
+                if tick % 3 == 0 {
+                    dumpMenuState("tick")
+                }
+            }
+        }
+        timer.tolerance = 0.5
+    }
+
+    /// 创建带 SF Symbol 图标的菜单项（macOS 14+）。
+    @MainActor private static func item(_ title: String, symbol: String? = nil,
+                                        action: Selector?, key: String = "",
+                                        target: AnyObject? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = target
+        if let symbol {
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        }
+        return item
+    }
+
+    @MainActor static func buildMenu(language: AppLanguage) -> NSMenu {
+        let lang = language
+        let main = NSMenu()
+
+        // ── 应用菜单（Harness）──
+        let appItem = NSMenuItem()
+        main.addItem(appItem)
+        let appMenu = NSMenu()
+        appItem.submenu = appMenu
+        appMenu.addItem(withTitle: lang == .zh ? "关于 Harness" : "About Harness",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(item(lang == .zh ? "设置…" : "Settings…", symbol: "gearshape",
+                             action: #selector(MenuActions.openSettings), key: ",",
+                             target: MenuActions.shared))
+        appMenu.addItem(.separator())
+        let logsItem = item(lang == .zh ? "日志" : "Logs", symbol: "terminal",
+                             action: #selector(MenuActions.toggleLogs), key: "l",
+                             target: MenuActions.shared)
+        logsItem.keyEquivalentModifierMask = [.command, .shift]
+        appMenu.addItem(logsItem)
+        let restartItem = item(lang == .zh ? "重启服务" : "Restart Service", symbol: "arrow.clockwise",
+                               action: #selector(MenuActions.restartService), key: "r",
+                               target: MenuActions.shared)
+        restartItem.keyEquivalentModifierMask = [.command, .shift]
+        appMenu.addItem(restartItem)
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: lang == .zh ? "隐藏 Harness" : "Hide Harness",
+                        action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: lang == .zh ? "退出 Harness" : "Quit Harness",
+                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        // ── 文件 ──
+        let fileItem = NSMenuItem()
+        main.addItem(fileItem)
+        let fileMenu = NSMenu(title: lang == .zh ? "文件" : "File")
+        fileItem.submenu = fileMenu
+        let openItem = item(lang == .zh ? "在浏览器中打开" : "Open in Browser", symbol: "safari",
+                             action: #selector(MenuActions.openInBrowser), key: "o",
+                             target: MenuActions.shared)
+        openItem.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(openItem)
+
+        // ── 编辑（WebView 需要剪贴板/撤销）──
+        let editItem = NSMenuItem()
+        main.addItem(editItem)
+        let editMenu = NSMenu(title: lang == .zh ? "编辑" : "Edit")
+        editItem.submenu = editMenu
+        editMenu.addItem(withTitle: lang == .zh ? "撤销" : "Undo",
+                         action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: lang == .zh ? "重做" : "Redo",
+                         action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: lang == .zh ? "剪切" : "Cut",
+                         action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: lang == .zh ? "复制" : "Copy",
+                         action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: lang == .zh ? "粘贴" : "Paste",
+                         action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: lang == .zh ? "全选" : "Select All",
+                         action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        // ── 视图 ──
+        let viewItem = NSMenuItem()
+        main.addItem(viewItem)
+        let viewMenu = NSMenu(title: lang == .zh ? "视图" : "View")
+        viewItem.submenu = viewMenu
+        let reloadItem = item(lang == .zh ? "重新加载页面" : "Reload Page", symbol: "arrow.clockwise",
+                               action: #selector(MenuActions.reloadPage), key: "r",
+                               target: MenuActions.shared)
+        viewMenu.addItem(reloadItem)
+
+        // ── 窗口 ──
+        let windowItem = NSMenuItem()
+        main.addItem(windowItem)
+        let windowMenu = NSMenu(title: lang == .zh ? "窗口" : "Window")
+        windowItem.submenu = windowMenu
+        windowMenu.addItem(withTitle: lang == .zh ? "最小化" : "Minimize",
+                           action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: lang == .zh ? "缩放" : "Zoom",
+                           action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: lang == .zh ? "前置全部窗口" : "Bring All to Front",
+                           action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+
+        return main
+    }
+}
+
+/// 菜单动作的目标（AppKit 菜单的 action 需要 NSObject 目标）。
+@MainActor
+final class MenuActions: NSObject {
+    static let shared = MenuActions()
+    /// 打开独立日志窗口（正常运行时）。
+    @objc func toggleLogs() {
+        LogPanel.shared.toggle()
+    }
+
+    @objc func restartService() {
+        ServerManager.shared.restart()
+    }
+
+    @objc func reloadPage() {
+        AppState.shared.webController.reload()
+    }
+
+    @objc func openInBrowser() {
+        if let url = AppState.shared.server.webURL {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// 设置窗口（AppKit NSPanel 托管 SwiftUI 视图 —— 比 SwiftUI Settings
+    /// 场景更可控：菜单 action 可直接触发，关闭后可重复打开）。
+    @objc func openSettings() {
+        let panel = SettingsPanel.shared
+        if !panel.isVisible {
+            panel.center()
+        }
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+/// 单例设置面板。
+@MainActor
+final class SettingsPanel: NSPanel {
+    static let shared = SettingsPanel()
+
+    private init() {
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 140),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        title = "设置"
+        contentView = NSHostingView(rootView: SettingsView())
+        isReleasedWhenClosed = false
+    }
+}
