@@ -24,6 +24,9 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Run unit tests
+        run: swift test
+
       - name: Build universal app
         env:
           VERSION: ${{ steps.version.outputs.version }}
