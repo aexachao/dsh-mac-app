@@ -63,6 +63,10 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 CI 会自动：双架构编译 → 打包 zip → 从 CHANGELOG 提取条目 + 生成提交列表 → 创建 GitHub Release。
 
+## 开源协议
+
+本仓库采用 GNU AGPL-3.0（Affero 通用公共许可证第 3 版）。修改后的版本若通过网络提供服务，须向用户提供对应源码。详见 [LICENSE](LICENSE)。
+
 ## 安全
 
 - 不提交任何密钥/令牌（.gitignore 已覆盖常见敏感文件）

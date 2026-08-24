@@ -41,7 +41,7 @@ scripts/build.sh          # SwiftPM 编译 → .app 组装 → 签名 → 安装
 
 ## 开源协议与贡献
 
-- 本仓库采用 [MIT License](LICENSE)。
+- 本仓库采用 [GNU AGPL-3.0](LICENSE)（Affero General Public License v3）。
 - 贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)（开发环境、代码规范、测试要求、提交流程）。
 
 ## 依赖
