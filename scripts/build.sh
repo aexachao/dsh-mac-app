@@ -76,8 +76,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "==> codesign (ad-hoc)"
-codesign --force --deep --sign - "$APP"
+# 签名：优先用稳定自签名证书（CODESIGN_IDENTITY），保证 TCC 授权持久
+#（ad-hoc 每次构建签名变化，导致文件夹权限每次重新请求）
+IDENTITY="${CODESIGN_IDENTITY:-Harness Local Signing}"
+echo "==> codesign ($IDENTITY)"
+codesign --force --deep --sign "$IDENTITY" "$APP" 2>/dev/null \
+  || codesign --force --deep --sign - "$APP"
 
 if [ "${NO_INSTALL:-}" != "1" ]; then
   DEST="$HOME/Applications/$NAME.app"
