@@ -42,10 +42,9 @@ jobs:
         id: changelog
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          # 取 CHANGELOG.md 中该版本条目（到下一个 ## 为止）
+          # 取 CHANGELOG.md 中该版本条目（到下一个 ## 为止）；缺失时仅提交列表
           awk -v v="## [$VERSION]" 'index($0, v)==1 {f=1; next} f && /^## / {f=0} f {print}' CHANGELOG.md > /tmp/notes-body.md
-          # 附加提交列表（上一 tag 至今）
-          echo "" >> /tmp/notes-body.md
+          if [ -s /tmp/notes-body.md ]; then echo "" >> /tmp/notes-body.md; fi
           echo "### Commits" >> /tmp/notes-body.md
           PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
           if [ -n "$PREV" ]; then
