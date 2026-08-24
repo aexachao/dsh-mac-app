@@ -10,8 +10,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NAME="Harness"
-VERSION="${VERSION:-0.2.0}"
-BUILD="${BUILD:-1}"
+# 版本：优先 VERSION 环境变量；未指定时从 git 自动推导——
+#   有 tag（vX.Y.Z）→ X.Y.Z；无 tag → 0.0.0-<git提交计数>
+# BUILD 同理：优先环境变量，否则用 git 提交计数。
+VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0)}"
+BUILD="${BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"
 ARCHS="${ARCHS:-arm64 x86_64}"
 APP="dist/$NAME.app"
 

@@ -51,6 +51,14 @@ NO_INSTALL=1 ./scripts/build.sh
    - 截图（视觉改动）
 5. 等待 review；按反馈修改（`git push --force` 更新分支）
 
+## 版本管理
+
+- **版本来源**：`git tag`（`vX.Y.Z`）是唯一事实来源。构建时：
+  - `VERSION`/`BUILD` 环境变量可覆盖（CI 用 tag 注入）；
+  - 未指定时自动推导：`git describe --tags`（有 tag → `X.Y.Z`）+ git 提交计数（BUILD）。
+- **应用内查看**：菜单「关于 Harness」显示版本与构建号（读 Info.plist）。
+- **规则**：每次发版前更新 `CHANGELOG.md` → 打 tag → 推送（CI 自动构建发布）。
+
 ## 发布流程（维护者）
 
 打 tag 即触发 GitHub Actions 自动发布（universal 构建 + Release + 变更日志）：
