@@ -12,3 +12,6 @@ DerivedData/
 .build-x86_64/
 # 技能安装锁文件（本机个人环境，不入库）
 skills-lock.json
+# 技能安装目录（个人环境，不入库）
+.agents/skills/
+.claude/skills/
