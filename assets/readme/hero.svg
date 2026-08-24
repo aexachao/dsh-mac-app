@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="100%" role="img" aria-labelledby="title desc">
+  <title id="title">Harness — DeepSeek dsh web 的 macOS 原生应用</title>
+  <desc id="desc">深色终端风格标题：应用名、价值描述、服务状态指示、快捷键与启动日志片段</desc>
+
+  <!-- 背景 -->
+  <rect width="1200" height="400" fill="#0f1115" rx="20"/>
+  <rect x="0" y="370" width="1200" height="30" fill="#0c0e12" rx="20"/>
+
+  <!-- 顶部状态栏：模拟应用菜单/状态行 -->
+  <rect x="24" y="22" width="10" height="10" rx="5" fill="#ff5f57"/>
+  <rect x="40" y="22" width="10" height="10" rx="5" fill="#febc2e"/>
+  <rect x="56" y="22" width="10" height="10" rx="5" fill="#28c840"/>
+  <text x="80" y="31" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="14" fill="#c3c9d1">Harness</text>
+  <circle cx="1072" cy="27" r="5" fill="#30d158"/>
+  <text x="1084" y="31" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="13" fill="#8b919a">服务运行中</text>
+
+  <!-- 标题区（左，与右侧日志面板不重叠：右边界控制在 640 内） -->
+  <text x="56" y="140" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="72" font-weight="700" fill="#e8eaed">Harness</text>
+  <text x="57" y="184" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif" font-size="23" fill="#a6adb8">DeepSeek dsh web 的 macOS 原生应用</text>
+  <text x="57" y="212" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif" font-size="16" fill="#6b7280">打开即启动服务 · 退出即停止 · 中文菜单栏</text>
+
+  <!-- 状态与快捷键 -->
+  <text x="57" y="256" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16" fill="#30d158">❯ dsh web: http://127.0.0.1:3080</text>
+
+  <rect x="57" y="278" width="162" height="32" rx="16" fill="#171a21" stroke="#2a2d36"/>
+  <text x="73" y="299" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="13" fill="#e8eaed">⌘⇧L 日志</text>
+  <rect x="231" y="278" width="186" height="32" rx="16" fill="#171a21" stroke="#2a2d36"/>
+  <text x="247" y="299" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="13" fill="#e8eaed">⌘⇧R 重启服务</text>
+  <rect x="429" y="278" width="212" height="32" rx="16" fill="#171a21" stroke="#2a2d36"/>
+  <text x="445" y="299" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="13" fill="#e8eaed">⌘⇧O 浏览器打开</text>
+
+  <!-- 右下：启动日志片段 -->
+  <rect x="700" y="88" width="448" height="252" rx="12" fill="#12151a" stroke="#232733"/>
+  <text x="724" y="118" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" fill="#8b919a">$ dsh web</text>
+  <text x="724" y="144" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" fill="#5c6470">[11:02:03] 启动中…</text>
+  <text x="724" y="170" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" fill="#5c6470">[11:02:04] 服务进程已启动</text>
+  <text x="724" y="196" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" fill="#4d6bfe">[11:02:05] 服务就绪</text>
+  <text x="724" y="222" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" fill="#8b919a">❯ dsh web: http://127.0.0.1:3080</text>
+  <text x="724" y="248" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" fill="#5c6470">[11:02:06] 日志面板 ⌘⇧L</text>
+  <rect x="724" y="280" width="8" height="16" fill="#30d158">
+    <animate attributeName="opacity" values="1;0;1" dur="1.2s" repeatCount="indefinite"/>
+  </rect>
+
+  <!-- 底部元数据 -->
+  <text x="56" y="352" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="14" fill="#5c6470">macOS 14+ · Universal（Apple Silicon + Intel）· SwiftUI + WKWebView · GNU AGPL-3.0</text>
+</svg>
