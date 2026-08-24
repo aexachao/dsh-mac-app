@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-    # 排除 tag 推送本身触发的 run（避免循环）
-    tags-ignore:
-      - '**'
 
 permissions:
   contents: write
@@ -15,7 +12,8 @@ jobs:
   bump-and-tag:
     name: Auto-bump version and tag
     runs-on: ubuntu-latest
-    if: ${{ !startsWith(github.event.head_commit.message, 'docs:') && !startsWith(github.event.head_commit.message, 'chore:') }}
+    # 只处理 main 分支提交；tag 推送（ref_type=tag）直接跳过，避免自触发循环
+    if: ${{ github.ref_type == 'branch' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'docs:') && !startsWith(github.event.head_commit.message, 'chore:') }}
     steps:
       - name: Checkout with full history
         uses: actions/checkout@v4
