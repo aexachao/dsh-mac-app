@@ -12,6 +12,8 @@ jobs:
   bump-and-tag:
     name: Auto-bump version and tag
     runs-on: ubuntu-latest
+    outputs:
+      next: ${{ steps.version.outputs.next }}
     # 只处理 main 分支提交；tag 推送（ref_type=tag）直接跳过，避免自触发循环
     if: ${{ github.ref_type == 'branch' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'docs:') && !startsWith(github.event.head_commit.message, 'chore:') }}
     steps:
@@ -24,7 +26,6 @@ jobs:
       - name: Compute next version
         id: version
         run: |
-          # 取最新 tag（vX.Y.Z），无 tag 则从 v0.0.0 起步
           LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
           MAJOR=$(echo "$LATEST" | sed -E 's/^v([0-9]+)\..*/\1/')
           MINOR=$(echo "$LATEST" | sed -E 's/^v[0-9]+\.([0-9]+).*/\1/')
@@ -41,5 +42,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag "${{ steps.version.outputs.next }}"
-          git push origin "${{ steps.version.outputs.next }}"
-          echo "tag ${{ steps.version.outputs.next }} created — Release workflow will pick it up"
+          # GITHUB_TOKEN 推送的 tag 不触发其他 workflow，这里 push 供手动引用；
+          # 构建发布由下面的 reusable workflow 在同一 run 内完成。
+          git push origin "${{ steps.version.outputs.next }}" || echo "tag already pushed"
+
+  release:
+    name: Build and publish
+    needs: bump-and-tag
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.bump-and-tag.outputs.next }}
