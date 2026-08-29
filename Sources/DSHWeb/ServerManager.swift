@@ -313,20 +313,32 @@ final class ServerManager {
         }
     }
 
-    /// 追加一行日志（带时间戳，容量封顶）。
+    /// 追加一行日志（脱敏 → 时间戳 → 容量封顶）。
+    ///
+    /// 脱敏放在这个唯一入口而不是 `ingest`：应用自己拼的消息也可能带上 URL 或路径，
+    /// 只有统一过一遍才能保证缓冲区里不存在未脱敏的行——日志会被用户整段复制出去。
     private func log(_ line: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        logLines.append("[\(formatter.string(from: Date()))] \(line)")
+        logLines.append("[\(timestampFormatter.string(from: Date()))] \(SecretMasker.mask(line))")
         if logLines.count > maxLogLines {
             logLines.removeFirst(logLines.count - maxLogLines)
         }
     }
 
+    /// 复用的时间戳格式化器：dsh 日志高峰时每行新建 DateFormatter 会明显拖慢主线程。
+    private let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
     /// 进入失败态并保证日志可见（UI 会随 state 自动展开日志面板）。
+    ///
+    /// 失败文案会显示在界面上、并随截图一起流出，所以同样先脱敏：
+    /// `error.localizedDescription` 可能带上完整命令行或 URL。
     private func fail(_ message: String) {
-        log("[dsh-web] ❌ \(message)")
-        state = .failed(message)
+        let safe = SecretMasker.mask(message)
+        log("[dsh-web] ❌ \(safe)")
+        state = .failed(safe)
     }
 
     /// 后台持续读取管道数据，按行切分后跳回主线程交给 `ingest`。

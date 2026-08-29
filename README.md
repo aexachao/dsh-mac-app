@@ -21,7 +21,7 @@
 
 - **服务生命周期** — 打开启动 / 退出停止；`⌘⇧R` 彻底重启（自动清理残留进程），插件或配置变更一次生效
 - **快速启动** — 缓存存在时跳过网络检查，2 秒内就绪；端口可连即显示界面
-- **日志面板** — 菜单 `⌘⇧L` 打开独立日志窗口；启动失败时主界面自动展开错误日志
+- **日志面板** — 菜单 `⌘⇧L` 打开独立日志窗口；启动失败时主界面自动展开错误日志；密钥、Cookie、OAuth 回调参数在写入前自动脱敏，日志可直接贴到 issue
 - **沉浸式界面** — 隐藏标题栏、深色窗口背景，网页内容铺满窗口
 - **浏览器兜底** — `⌘⇧O` 在 Chrome 打开同一界面（WebView 流式渲染卡顿时）
 - **中文菜单栏** — 简体中文默认；设置中可切换 English，重启后应用与 dsh 界面语言同步
@@ -52,16 +52,19 @@ swift test
 
 ```
 Sources/DSHWeb/
-├── main.swift              # AppKit 入口（菜单不被 SwiftUI 覆盖）
-├── DSHWebApp.swift         # 应用生命周期与窗口创建
-├── ServerManager.swift     # 服务进程：启动/停止/重启/日志/状态机
-├── MenuBuilder.swift       # 中英文菜单栏 + 语言偏好 + dsh 语言同步
-├── ContentView.swift       # 主界面：三态内容区 + 日志面板
-├── LogPanel.swift          # 独立日志窗口
-├── SettingsView.swift      # 设置（语言切换）
-├── WebViewController.swift # WKWebView 封装（性能优化）
-└── WindowAccessor.swift    # 窗口外观（隐藏标题栏、深色背景）
-scripts/build.sh            # SwiftPM 编译 → .app 组装 → 签名 → 安装
+├── main.swift               # AppKit 入口（菜单不被 SwiftUI 覆盖）
+├── DSHWebApp.swift          # 应用生命周期与窗口创建
+├── ServerManager.swift      # 服务进程：启动/停止/重启/日志/状态机
+├── PortStrategy.swift       # 端口选择策略 + 本地端口占用判定
+├── DSHProcessIdentity.swift # 核对进程确实是 dsh（接管或清理前）
+├── SecretMasker.swift       # 日志脱敏（密钥 / Cookie / OAuth 参数）
+├── MenuBuilder.swift        # 中英文菜单栏 + 语言偏好 + dsh 语言同步
+├── ContentView.swift        # 主界面：三态内容区 + 日志面板
+├── LogPanel.swift           # 独立日志窗口
+├── SettingsView.swift       # 设置（语言切换）
+├── WebViewController.swift  # WKWebView 封装（性能优化）
+└── WindowAccessor.swift     # 窗口外观（隐藏标题栏、深色背景）
+scripts/build.sh             # SwiftPM 编译 → .app 组装 → 签名 → 安装
 ```
 
 ## 依赖
