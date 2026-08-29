@@ -46,6 +46,7 @@ swift test
 - 原生 SwiftUI + WKWebView（无 Electron），AppKit 手动入口掌控菜单与窗口
 - 服务以 `node <dsh boot> web` 直接子进程运行，退出时干净终止
 - `ServerManager` 状态机：`starting / running / external / failed`；显式指定端口、冲突时退让、只清理可确认的 dsh 残留进程
+- 日志脱敏后同时进内存缓冲区与 `~/Library/Logs/Harness/`（分段轮转、目录总量封顶、只清理自己写的文件）；「文件 → 导出诊断信息…」可一键导出环境与最近日志
 - 菜单栏中英文两套，语言偏好同步写入 dsh 的 `~/.dsh/settings.yaml`（`locale.preference`）
 
 ## 目录结构
@@ -58,6 +59,9 @@ Sources/DSHWeb/
 ├── PortStrategy.swift       # 端口选择策略 + 本地端口占用判定
 ├── DSHProcessIdentity.swift # 核对进程确实是 dsh（接管或清理前）
 ├── SecretMasker.swift       # 日志脱敏（密钥 / Cookie / OAuth 参数）
+├── LogRotation.swift        # 落盘日志命名/时序/清理策略（纯函数）
+├── LogFileSink.swift        # 日志落盘与轮转（~/Library/Logs/Harness）
+├── DiagnosticsReport.swift  # 诊断报告渲染（导出前整份脱敏）
 ├── MenuBuilder.swift        # 中英文菜单栏 + 语言偏好 + dsh 语言同步
 ├── ContentView.swift        # 主界面：三态内容区 + 日志面板
 ├── LogPanel.swift           # 独立日志窗口

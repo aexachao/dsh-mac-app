@@ -32,11 +32,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         ServerManager.shared.stop()
+        ServerManager.shared.closeLogFile()
         return .terminateNow
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // 兜底（如系统关机），保证不留孤儿进程
+        // 兜底（如系统关机），保证不留孤儿进程、且最后几行日志已落盘
         ServerManager.shared.stop()
+        ServerManager.shared.closeLogFile()
     }
 }

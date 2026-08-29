@@ -41,8 +41,15 @@ final class ServerManager {
     private var process: Process?
     private var logQueue = DispatchQueue(label: "dsh-web.log")
     private let maxLogLines = 5000
+    /// 日志落盘。内存缓冲区随进程消失，而「打开就退出」这类问题只能靠落盘回看。
+    private let logFile: LogFileSink
 
     // MARK: - 启动入口
+
+    /// 日志落盘目标可注入，便于单测用临时目录。
+    init(logFile: LogFileSink = LogFileSink()) {
+        self.logFile = logFile
+    }
 
     /// 应用启动时调用：先看默认端口上是否已有 dsh 服务，再决定接管还是自己启动。
     func start() {
@@ -313,15 +320,18 @@ final class ServerManager {
         }
     }
 
-    /// 追加一行日志（脱敏 → 时间戳 → 容量封顶）。
+    /// 追加一行日志（脱敏 → 时间戳 → 容量封顶 → 落盘）。
     ///
     /// 脱敏放在这个唯一入口而不是 `ingest`：应用自己拼的消息也可能带上 URL 或路径，
     /// 只有统一过一遍才能保证缓冲区里不存在未脱敏的行——日志会被用户整段复制出去。
+    /// 落盘同样走这里，因此磁盘上的内容与界面上看到的完全一致（都已脱敏）。
     private func log(_ line: String) {
-        logLines.append("[\(timestampFormatter.string(from: Date()))] \(SecretMasker.mask(line))")
+        let entry = "[\(timestampFormatter.string(from: Date()))] \(SecretMasker.mask(line))"
+        logLines.append(entry)
         if logLines.count > maxLogLines {
             logLines.removeFirst(logLines.count - maxLogLines)
         }
+        logFile.append(entry)
     }
 
     /// 复用的时间戳格式化器：dsh 日志高峰时每行新建 DateFormatter 会明显拖慢主线程。
@@ -363,6 +373,63 @@ final class ServerManager {
                 }
             }
         }
+    }
+
+    // MARK: - 诊断导出
+
+    /// 落盘日志目录（诊断报告与「打开日志目录」都用它）。
+    var logDirectory: URL { LogFileSink.defaultDirectory }
+
+    /// 关闭落盘句柄（应用退出前调用；同时保证已入队的行都写完）。
+    func closeLogFile() {
+        logFile.close()
+    }
+
+    /// 采集当前环境并渲染一份诊断报告。
+    ///
+    /// 先 `flush()` 再读文件清单：不然刚写的行可能还在队列里，报告里的文件列表会缺最新一段。
+    /// 报告内容由 `DiagnosticsReport` 统一脱敏，这里只负责采集事实。
+    func diagnosticsReport(tailLines: Int = 200, now: Date = Date()) -> String {
+        logFile.flush()
+        let environment = DiagnosticsReport.Environment(
+            appVersion: Self.bundleValue("CFBundleShortVersionString"),
+            appBuild: Self.bundleValue("CFBundleVersion"),
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            architecture: Self.architecture,
+            nodePath: resolveNode()?.path,
+            bootJSPath: resolveBootJS()?.path,
+            port: port,
+            state: Self.describe(state),
+            language: MenuBuilder.current.rawValue,
+            logDirectory: logDirectory.path,
+            logFiles: logFile.ownedFileNames(),
+            generatedAt: now
+        )
+        return DiagnosticsReport.render(environment: environment, logTail: Array(logLines.suffix(tailLines)))
+    }
+
+    /// 状态的可读描述（报告用；不本地化，便于在 issue 里直接匹配代码）。
+    private static func describe(_ state: ServerState) -> String {
+        switch state {
+        case .starting: return "starting"
+        case .running(let port): return "running(port: \(port))"
+        case .external(let port): return "external(port: \(port))"
+        case .failed(let message): return "failed(\(message))"
+        }
+    }
+
+    private static func bundleValue(_ key: String) -> String {
+        Bundle.main.infoDictionary?[key] as? String ?? "unknown"
+    }
+
+    private static var architecture: String {
+        #if arch(arm64)
+        return "arm64"
+        #elseif arch(x86_64)
+        return "x86_64"
+        #else
+        return "unknown"
+        #endif
     }
 
     // MARK: - 环境解析

@@ -83,6 +83,27 @@ struct MenuBuilderTests {
         #expect(restart?.keyEquivalent == "r")
         #expect(restart?.keyEquivalentModifierMask == [.command, .shift])
     }
+
+    // MARK: - 诊断导出
+
+    @Test func fileMenuExposesDiagnosticsActions() {
+        // 报障入口必须能点到：没有它用户只能手抄环境信息
+        let menu = MenuBuilder.buildMenu(language: .zh)
+        let fileMenu = menu.items.compactMap(\.submenu).first { $0.title == "文件" }
+        let export = fileMenu?.items.first { $0.title == "导出诊断信息…" }
+        #expect(export?.action == #selector(MenuActions.exportDiagnostics))
+        #expect(export?.target !== nil)
+        let openFolder = fileMenu?.items.first { $0.title == "打开日志目录" }
+        #expect(openFolder?.action == #selector(MenuActions.openLogDirectory))
+        #expect(openFolder?.target !== nil)
+    }
+
+    @Test func diagnosticsActionsHaveEnglishTitles() {
+        let fileMenu = MenuBuilder.buildMenu(language: .en).items.compactMap(\.submenu).first { $0.title == "File" }
+        let titles = fileMenu?.items.map(\.title) ?? []
+        #expect(titles.contains("Export Diagnostics…"))
+        #expect(titles.contains("Open Log Folder"))
+    }
 }
 
 // MARK: - 语言同步（dsh settings.yaml）

@@ -1,6 +1,7 @@
 import AppKit
 import OSLog
 import SwiftUI
+import UniformTypeIdentifiers
 
 private let menuLog = Logger(subsystem: "local.harness.app", category: "menu")
 
@@ -166,6 +167,13 @@ enum MenuBuilder {
                              target: MenuActions.shared)
         openItem.keyEquivalentModifierMask = [.command, .shift]
         fileMenu.addItem(openItem)
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(item(lang == .zh ? "导出诊断信息…" : "Export Diagnostics…", symbol: "stethoscope",
+                              action: #selector(MenuActions.exportDiagnostics),
+                              target: MenuActions.shared))
+        fileMenu.addItem(item(lang == .zh ? "打开日志目录" : "Open Log Folder", symbol: "folder",
+                              action: #selector(MenuActions.openLogDirectory),
+                              target: MenuActions.shared))
 
         // ── 编辑（WebView 需要剪贴板/撤销）──
         let editItem = NSMenuItem()
@@ -234,6 +242,37 @@ final class MenuActions: NSObject {
         if let url = AppState.shared.server.webURL {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    /// 导出诊断报告到用户选定的文件。
+    ///
+    /// 用保存对话框而不是直接写到桌面：报告含本机路径，去哪儿应该由用户决定。
+    /// 内容已由 `DiagnosticsReport` 脱敏——它是整份内容离开本机前的最后一道关口。
+    @objc func exportDiagnostics() {
+        let language = MenuBuilder.current
+        let report = ServerManager.shared.diagnosticsReport()
+        let panel = NSSavePanel()
+        panel.title = language == .zh ? "导出诊断信息" : "Export Diagnostics"
+        panel.nameFieldStringValue = DiagnosticsReport.suggestedFileName(at: Date())
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try report.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = language == .zh ? "导出失败" : "Export failed"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    /// 在 Finder 中显示落盘日志目录（还没写过日志时目录可能不存在，先建出来）。
+    @objc func openLogDirectory() {
+        let directory = ServerManager.shared.logDirectory
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: directory.path)
     }
 
     /// 设置窗口（AppKit NSPanel 托管 SwiftUI 视图 —— 比 SwiftUI Settings
