@@ -6,30 +6,36 @@
 
 - macOS 14+
 - Xcode 16+（Swift 6 工具链）
-- Node.js（运行时依赖，自动探测 nvm / Homebrew / 系统路径）
+- Node.js（仅本地开发需要：`swift run` 与不带 `BUNDLE_RUNTIME` 的构建没有内置运行时，会退回本机的 node + npx 缓存里的 dsh；发布包自带运行时，用户不需要装）
 
 ## 本地开发
 
 ```bash
-# 构建（默认 universal 双架构）
-./scripts/build.sh
-
-# 单架构快速构建（本地迭代更快）
+# 本地迭代：单架构、不捆绑运行时（最快）
 ARCHS=arm64 ./scripts/build.sh
 
 # 运行单元测试
 swift test
 
 # 仅构建（不安装到 ~/Applications）
-NO_INSTALL=1 ./scripts/build.sh
+NO_INSTALL=1 ARCHS=arm64 ./scripts/build.sh
+
+# 发布形态：把 runtime-pins.json 锁定的 node + dsh 备进 .app
+# 只能单架构，且只能在对应架构的机器上跑（dsh 依赖树含平台专属原生模块，不做交叉）
+BUNDLE_RUNTIME=1 ARCHS=arm64 NO_INSTALL=1 ./scripts/build.sh
+
+# 检查签名是否满足公证要求（只做本地预检，不上传）
+PRECHECK_ONLY=1 ./scripts/notarize.sh dist/Harness.app
 ```
+
+> 首次带 `BUNDLE_RUNTIME=1` 构建要下载 node 并安装 dsh 的完整依赖树（约 250 MB），耗时以十分钟计；结果缓存在 `.runtime-cache/`。日常改代码不需要它。
 
 ## 代码规范
 
 - Swift 6 严格并发（MainActor 隔离、`nonisolated(unsafe)` 仅用于明确场景）
 - 遵循现有文件组织：功能模块一个文件，不超过 800 行
 - 不可变优先：不修改已有对象，返回新副本
-- 所有用户可见文案中英双语（`MenuBuilder` 中通过 `AppLanguage` 切换）
+- 所有用户可见文案中英双语：新增文案写进 `Strings.swift`（`Key` + 穷尽 `switch`，漏一种语言编译不过；`StringsTests` 会拒绝空文案、英文位里的中文、两边占位符对不上）。菜单树与 `FailureCause` 自带完整双语表，日志行故意保持单语
 - 所有颜色使用 SF Symbol / AppKit 标准控件，不引入硬编码主题色
 
 ## 测试要求
@@ -44,7 +50,7 @@ NO_INSTALL=1 ./scripts/build.sh
 2. 遵循 Conventional Commits：`feat:` / `fix:` / `refactor:` / `docs:` / `test:` / `chore:` / `perf:` / `ci:`
 3. 提交前：
    - `swift test` 全部通过
-   - `./scripts/build.sh` 构建成功
+   - `ARCHS=arm64 ./scripts/build.sh` 构建成功
 4. 提交 PR 到 `main` 分支，描述包含：
    - 改动摘要与原因
    - 测试结果
@@ -61,7 +67,7 @@ NO_INSTALL=1 ./scripts/build.sh
 
 ## 发布流程（维护者）
 
-打 tag 即触发 GitHub Actions 自动发布（universal 构建 + Release + 变更日志）：
+打 tag 即触发 GitHub Actions 自动发布（按架构构建 + 签名公证 + Release + 变更日志）：
 
 ```bash
 # 1. 更新 CHANGELOG.md（新增 [x.y.z] 条目）
@@ -69,7 +75,19 @@ NO_INSTALL=1 ./scripts/build.sh
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-CI 会自动：双架构编译 → 打包 zip → 从 CHANGELOG 提取条目 + 生成提交列表 → 创建 GitHub Release。
+CI 会自动：跑测试 → 在 `macos-15` 与 `macos-15-intel` 上各自捆绑运行时并构建 → 签名 + 公证 + 装订票据 → 打包 zip 与 SHA256 → 从 CHANGELOG 提取条目 + 生成提交列表 → 创建 GitHub Release。产物是两个包（`apple-silicon` / `intel`），不出 universal——dsh 依赖树含平台专属原生模块，一份 `node_modules` 只能属于一个架构。
+
+完整签名与公证需要以下仓库 secrets；缺失时会降级而不是失败（缺证书 → ad-hoc 签名，缺 API 密钥 → 只签名不公证），并在日志里给出 warning：
+
+| Secret | 内容 |
+|---|---|
+| `MACOS_CERT_P12` | Developer ID Application 证书 + 私钥的 `.p12`，base64 |
+| `MACOS_CERT_PASSWORD` | 导出 `.p12` 时设的密码 |
+| `AC_API_KEY_ID` | App Store Connect API 密钥 ID |
+| `AC_API_ISSUER_ID` | App Store Connect Issuer ID |
+| `AC_API_KEY_P8` | `.p8` 私钥文件，base64 |
+
+另有 `follow-upstream.yml` 每天检查上游版本，`runtime-pins.json` 有变化就开 PR。**合并前必须人工验证**——锁文件一变就等于换运行时，PR 描述里带了验证清单。
 
 ## 开源协议
 
