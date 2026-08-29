@@ -29,6 +29,10 @@ final class ServerManager {
     private(set) var port = PortStrategy.defaultPort
     /// 最近一次启动的健康判定结果（界面与安全模式都读它）。
     private(set) var health: StartupHealth.Outcome = .pending
+    /// 本次是否以安全模式启动（界面据此显示横幅）。
+    private(set) var isSafeMode = false
+    /// 安全模式本次停用的插件 id（界面列给用户看，让他知道少了什么）。
+    private(set) var disabledPlugins: [String] = []
 
     /// 界面用的就绪地址（由状态推导）。
     var webURL: URL? {
@@ -49,6 +53,8 @@ final class ServerManager {
     private var observation: StartupHealth.Observation?
     private let healthPolicy: StartupHealth.Policy
     private let streak: UnhealthyStreakStore
+    /// 「下次以安全模式启动」的持久化开关。
+    private let safeMode: SafeModeStore
 
     // MARK: - 启动入口
 
@@ -56,19 +62,24 @@ final class ServerManager {
     init(
         logFile: LogFileSink = LogFileSink(),
         healthPolicy: StartupHealth.Policy = .standard,
-        streak: UnhealthyStreakStore = UnhealthyStreakStore()
+        streak: UnhealthyStreakStore = UnhealthyStreakStore(),
+        safeMode: SafeModeStore = SafeModeStore()
     ) {
         self.logFile = logFile
         self.healthPolicy = healthPolicy
         self.streak = streak
+        self.safeMode = safeMode
     }
 
     /// 应用启动时调用：先看默认端口上是否已有 dsh 服务，再决定接管还是自己启动。
+    ///
+    /// 安全模式下不接管外部实例：那个实例是带着全部插件跑起来的，接管它等于绕过安全
+    /// 模式——界面会显示「已停用插件」，而实际上什么都没停用。
     func start() {
         guard process == nil else { return }
         log("[dsh-web] 启动中…")
         Task {
-            if await adoptExternalService(on: PortStrategy.defaultPort) { return }
+            if !shouldUseSafeMode, await adoptExternalService(on: PortStrategy.defaultPort) { return }
             launchServer()
         }
     }
@@ -197,10 +208,11 @@ final class ServerManager {
         }
         port = chosen
         log("[dsh-web] 使用 Node: \(node.path)")
+        let overlay = prepareSafeModeIfNeeded()
         Task {
             // 优化：缓存里已有 dsh 启动入口时直接使用，跳过 npx 网络检查（省 3-5s）
             if let boot = self.resolveBootJS() {
-                self.spawnServer(node: node, bootJS: boot)
+                self.spawnServer(node: node, bootJS: boot, overlay: overlay)
                 return
             }
             log("[dsh-web] 未找到 dsh 缓存，先通过 npx 安装…")
@@ -210,7 +222,7 @@ final class ServerManager {
                 self.fail(.bootJSMissing)
                 return
             }
-            self.spawnServer(node: node, bootJS: boot)
+            self.spawnServer(node: node, bootJS: boot, overlay: overlay)
         }
     }
 
@@ -255,11 +267,16 @@ final class ServerManager {
     /// 用 `--profile web` 而不是 `dsh web` 子命令形式：后者是前者的别名，且拒收
     /// `--patch` 等父级参数（`web takes none of parent --profile, --patch, …`），
     /// 而端口与后续的安全模式 overlay 都要从父级参数传入。
-    private func spawnServer(node: URL, bootJS: URL) {
+    private func spawnServer(node: URL, bootJS: URL, overlay: URL? = nil) {
         let p = Process()
         p.executableURL = node
         // 端口显式传入：不再假设 dsh 的默认端口与本应用的假设一致。
-        p.arguments = [bootJS.path, "--profile", "web", "--port", String(port)]
+        var arguments = [bootJS.path, "--profile", "web", "--port", String(port)]
+        if let overlay {
+            // overlay 是组合链的最后一层，只做「停用」这一件事。
+            arguments += ["--patch", overlay.path]
+        }
+        p.arguments = arguments
         p.currentDirectoryURL = homeDir
         p.environment = environment(node: node)
 
@@ -376,6 +393,75 @@ final class ServerManager {
         }
     }
 
+    // MARK: - 安全模式
+
+    /// 本次启动是否应当走安全模式。
+    ///
+    /// 两个来源：用户手动开的开关（存盘），或连续不健康启动已达阈值。后者才是主路径——
+    /// 崩溃循环里用户根本进不到任何界面去手动开。
+    private var shouldUseSafeMode: Bool {
+        safeMode.isEnabled
+            || StartupHealth.shouldEnterSafeMode(streak: streak.value, policy: healthPolicy)
+    }
+
+    /// 需要时写出安全模式 overlay，返回要传给 `--patch` 的路径。
+    ///
+    /// 插件清单静态扫描 profile 目录得来，不经过 dsh：安全模式存在的前提就是 dsh
+    /// 起不来，任何依赖它能运行的方案（`--dump-config`）在这里都用不上。
+    ///
+    /// 写不出 overlay 时返回 nil，正常启动。安全模式是补救手段，它自己失败不该把
+    /// 一次本来可能成功的启动也拖掉。
+    private func prepareSafeModeIfNeeded() -> URL? {
+        guard shouldUseSafeMode else {
+            isSafeMode = false
+            disabledPlugins = []
+            return nil
+        }
+        // 由连续失败自动触发时把开关存盘：下次启动仍是安全模式，直到用户显式退出。
+        if !safeMode.isEnabled {
+            safeMode.enable()
+            log("[dsh-web] 连续 \(streak.value) 次启动异常，本次进入安全模式。")
+        }
+
+        let plugins = PluginInventory.scan(profileDirectory: SafeModeOverlay.profileDirectory)
+        let disable = PluginInventory.thirdPartyIDs(in: plugins)
+        do {
+            let url = try SafeModeOverlay.write(disabling: disable)
+            isSafeMode = true
+            disabledPlugins = disable
+            log("[dsh-web] 安全模式：已停用 \(disable.count) 个第三方插件（overlay: \(url.path)）。")
+            if !disable.isEmpty {
+                log("[dsh-web] 安全模式停用清单：\(disable.joined(separator: ", "))")
+            }
+            return url
+        } catch {
+            log("[dsh-web] 安全模式 overlay 写入失败，本次按正常模式启动：\(error.localizedDescription)")
+            isSafeMode = false
+            disabledPlugins = []
+            return nil
+        }
+    }
+
+    /// 手动进入安全模式并重启（插件把界面搞坏、但应用还能用时的入口）。
+    func enterSafeMode() {
+        safeMode.enable()
+        log("[dsh-web] 已开启安全模式，正在重启服务…")
+        restart()
+    }
+
+    /// 退出安全模式并重启。
+    ///
+    /// 同时清零连续失败计数：不清的话计数仍在阈值上，下次启动会立刻被判回安全模式，
+    /// 用户点了「退出」却什么也没变。
+    func exitSafeMode() {
+        safeMode.disable()
+        streak.reset()
+        isSafeMode = false
+        disabledPlugins = []
+        log("[dsh-web] 已退出安全模式，正在重启服务…")
+        restart()
+    }
+
     // MARK: - 日志与状态机
 
     /// 服务进程输出 → 行缓冲 → 日志列表；识别就绪行。
@@ -486,7 +572,9 @@ final class ServerManager {
             language: MenuBuilder.current.rawValue,
             logDirectory: logDirectory.path,
             logFiles: logFile.ownedFileNames(),
-            generatedAt: now
+            generatedAt: now,
+            safeMode: isSafeMode,
+            disabledPlugins: disabledPlugins
         )
         return DiagnosticsReport.render(environment: environment, logTail: Array(logLines.suffix(tailLines)))
     }

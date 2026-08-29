@@ -150,6 +150,17 @@ enum MenuBuilder {
                                target: MenuActions.shared)
         restartItem.keyEquivalentModifierMask = [.command, .shift]
         appMenu.addItem(restartItem)
+        // 安全模式的菜单入口按当前状态二选一：同时给「进入」和「退出」两条会让用户
+        // 无从判断现在到底在哪个模式里。
+        let inSafeMode = ServerManager.shared.isSafeMode
+        appMenu.addItem(item(
+            inSafeMode
+                ? (lang == .zh ? "退出安全模式并重启" : "Exit Safe Mode and Restart")
+                : (lang == .zh ? "以安全模式重启" : "Restart in Safe Mode"),
+            symbol: inSafeMode ? "shield.slash" : "shield.lefthalf.filled",
+            action: #selector(MenuActions.toggleSafeMode),
+            target: MenuActions.shared
+        ))
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: lang == .zh ? "隐藏 Harness" : "Hide Harness",
                         action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
@@ -232,6 +243,18 @@ final class MenuActions: NSObject {
 
     @objc func restartService() {
         ServerManager.shared.restart()
+    }
+
+    /// 在安全模式与正常模式之间切换（两者都会重启服务）。
+    ///
+    /// 菜单每秒由 `startGuard` 重建，标题因此能跟上状态；这里只按当前状态取反。
+    @objc func toggleSafeMode() {
+        let server = ServerManager.shared
+        if server.isSafeMode {
+            server.exitSafeMode()
+        } else {
+            server.enterSafeMode()
+        }
     }
 
     @objc func reloadPage() {

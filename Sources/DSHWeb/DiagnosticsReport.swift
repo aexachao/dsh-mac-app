@@ -28,6 +28,10 @@ enum DiagnosticsReport {
         /// 落盘日志文件名（按写入时序）。
         let logFiles: [String]
         let generatedAt: Date
+        /// 本次是否以安全模式运行。
+        let safeMode: Bool
+        /// 安全模式停用的插件 id。
+        let disabledPlugins: [String]
 
         init(
             appVersion: String,
@@ -41,7 +45,9 @@ enum DiagnosticsReport {
             language: String,
             logDirectory: String,
             logFiles: [String],
-            generatedAt: Date
+            generatedAt: Date,
+            safeMode: Bool,
+            disabledPlugins: [String]
         ) {
             self.appVersion = appVersion
             self.appBuild = appBuild
@@ -55,6 +61,8 @@ enum DiagnosticsReport {
             self.logDirectory = logDirectory
             self.logFiles = logFiles
             self.generatedAt = generatedAt
+            self.safeMode = safeMode
+            self.disabledPlugins = disabledPlugins
         }
     }
 
@@ -80,6 +88,15 @@ enum DiagnosticsReport {
         out.append("## 服务 / Service")
         out.append("- 状态 / State: \(environment.state)")
         out.append("- 端口 / Port: \(environment.port)")
+        // 安全模式必须写明：这一屏少了插件，看 issue 的人若不知道，会照着一个不完整的
+        // 环境去复现。
+        out.append("- 安全模式 / Safe mode: \(environment.safeMode ? "on" : "off")")
+        if environment.safeMode {
+            out.append("- 已停用插件 / Disabled plugins (\(environment.disabledPlugins.count)): "
+                       + (environment.disabledPlugins.isEmpty
+                          ? "none"
+                          : environment.disabledPlugins.joined(separator: ", ")))
+        }
         out.append("")
 
         out.append("## 日志文件 / Log files")

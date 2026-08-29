@@ -22,6 +22,8 @@
 - **服务生命周期** — 打开启动 / 退出停止；`⌘⇧R` 彻底重启（自动清理残留进程），插件或配置变更一次生效
 - **快速启动** — 缓存存在时跳过网络检查，2 秒内就绪；端口可连即显示界面
 - **日志面板** — 菜单 `⌘⇧L` 打开独立日志窗口；启动失败时主界面自动展开错误日志；密钥、Cookie、OAuth 回调参数在写入前自动脱敏，日志可直接贴到 issue
+- **失败可自救** — 启动失败按原因分类，直接给出下一步（缺 Node 给下载入口、配置出错在 Finder 中定位、异常退出附最后一条报错并可导出诊断）
+- **安全模式** — 连续 3 次启动异常后自动停用第三方插件启动，横幅列出停用了什么并可一键退出；菜单也能手动进入。停用只走应用自己目录下的配置 overlay，不改动 `~/.dsh`
 - **沉浸式界面** — 隐藏标题栏、深色窗口背景，网页内容铺满窗口
 - **浏览器兜底** — `⌘⇧O` 在 Chrome 打开同一界面（WebView 流式渲染卡顿时）
 - **中文菜单栏** — 简体中文默认；设置中可切换 English，重启后应用与 dsh 界面语言同步
@@ -46,6 +48,7 @@ swift test
 - 原生 SwiftUI + WKWebView（无 Electron），AppKit 手动入口掌控菜单与窗口
 - 服务以 `node <dsh boot> web` 直接子进程运行，退出时干净终止
 - `ServerManager` 状态机：`starting / running / external / failed`；显式指定端口、冲突时退让、只清理可确认的 dsh 残留进程
+- 安全模式：静态扫描 `~/.dsh/profiles/web` 的 `package.json` + 各 bundle 的 `cordis.patch.yml` 得到插件清单（不需要 dsh 能启动），把「停用第三方插件」写成 `~/Library/Application Support/Harness/safe-mode.yml`，以 `--patch` 叠加
 - 日志脱敏后同时进内存缓冲区与 `~/Library/Logs/Harness/`（分段轮转、目录总量封顶、只清理自己写的文件）；「文件 → 导出诊断信息…」可一键导出环境与最近日志
 - 菜单栏中英文两套，语言偏好同步写入 dsh 的 `~/.dsh/settings.yaml`（`locale.preference`）
 
@@ -64,6 +67,8 @@ Sources/DSHWeb/
 ├── DiagnosticsReport.swift  # 诊断报告渲染（导出前整份脱敏）
 ├── StartupHealth.swift      # 启动是否真的成功（纯判定）+ 连续失败计数持久化
 ├── FailureCause.swift       # 失败原因分类与恢复动作（纯值类型）
+├── PluginInventory.swift    # 静态枚举 profile 装了哪些插件（不依赖 dsh 能启动）
+├── SafeMode.swift           # 安全模式 overlay 渲染/写盘 + 开关持久化
 ├── MenuBuilder.swift        # 中英文菜单栏 + 语言偏好 + dsh 语言同步
 ├── ContentView.swift        # 主界面：三态内容区 + 日志面板
 ├── LogPanel.swift           # 独立日志窗口

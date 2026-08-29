@@ -104,6 +104,18 @@ struct MenuBuilderTests {
         #expect(titles.contains("Export Diagnostics…"))
         #expect(titles.contains("Open Log Folder"))
     }
+
+    // MARK: - 安全模式
+
+    @Test func safeModeHasAMenuEntryInBothLanguages() throws {
+        // 插件把界面搞坏但应用还能用时，用户需要一个不依赖崩溃计数的手动入口
+        for (language, expected) in [(AppLanguage.zh, "以安全模式重启"), (.en, "Restart in Safe Mode")] {
+            let appMenu = try #require(MenuBuilder.buildMenu(language: language).items.first?.submenu)
+            let entry = appMenu.items.first { $0.title == expected }
+            #expect(entry?.action == #selector(MenuActions.toggleSafeMode))
+            #expect(entry?.target !== nil)
+        }
+    }
 }
 
 // MARK: - 语言同步（dsh settings.yaml）

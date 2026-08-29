@@ -11,7 +11,9 @@ struct DiagnosticsReportTests {
     private func environment(
         state: String = "running(port: 3080)",
         logFiles: [String] = ["harness-2026-08-29.log"],
-        nodePath: String? = "/Users/me/.nvm/versions/node/v24.13.0/bin/node"
+        nodePath: String? = "/Users/me/.nvm/versions/node/v24.13.0/bin/node",
+        safeMode: Bool = false,
+        disabledPlugins: [String] = []
     ) -> DiagnosticsReport.Environment {
         DiagnosticsReport.Environment(
             appVersion: "0.2.1",
@@ -25,8 +27,29 @@ struct DiagnosticsReportTests {
             language: "zh",
             logDirectory: "/Users/me/Library/Logs/Harness",
             logFiles: logFiles,
-            generatedAt: Date(timeIntervalSince1970: 1_787_000_000)
+            generatedAt: Date(timeIntervalSince1970: 1_787_000_000),
+            safeMode: safeMode,
+            disabledPlugins: disabledPlugins
         )
+    }
+
+    // MARK: 安全模式
+
+    @Test func safeModeIsStatedInTheReport() {
+        // 安全模式下界面少了插件，报障时如果不写明，看 issue 的人会照着一个不完整的
+        // 环境去复现
+        let report = DiagnosticsReport.render(
+            environment: environment(safeMode: true, disabledPlugins: ["dsh-market", "web-ui-pet"]),
+            logTail: []
+        )
+        #expect(report.contains("dsh-market"))
+        #expect(report.contains("web-ui-pet"))
+    }
+
+    @Test func normalModeSaysSoExplicitly() {
+        // 留空会让人以为报告漏了字段
+        let report = DiagnosticsReport.render(environment: environment(), logTail: [])
+        #expect(report.lowercased().contains("safe mode"))
     }
 
     // MARK: 必须出现的内容

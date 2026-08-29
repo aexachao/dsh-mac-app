@@ -8,6 +8,13 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if server.isSafeMode {
+                SafeModeBanner(
+                    disabled: server.disabledPlugins,
+                    onExit: { server.exitSafeMode() }
+                )
+                Divider()
+            }
             if needsHeader {
                 header
                 Divider()
@@ -145,6 +152,86 @@ struct ContentView: View {
         case .reveal(let path):
             NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: (path as NSString).deletingLastPathComponent)
         }
+    }
+}
+
+/// 安全模式横幅：连续启动失败后插件被停用了，用户必须一眼看到「现在的界面不完整」。
+///
+/// 三态之外单独一层，运行中也常驻显示：安全模式下界面看起来是正常的，只是少了插件——
+/// 如果不提示，用户会以为插件坏了，转头去插件那边找问题。
+struct SafeModeBanner: View {
+    let disabled: [String]
+    var onExit: () -> Void
+
+    @State private var showingList = false
+
+    private var language: AppLanguage { MenuBuilder.current }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "shield.lefthalf.filled")
+                .foregroundStyle(.orange)
+            Text(title)
+                .font(.callout)
+            if !disabled.isEmpty {
+                Button(language == .zh ? "查看清单" : "View List") {
+                    showingList = true
+                }
+                .buttonStyle(.link)
+                .popover(isPresented: $showingList, arrowEdge: .bottom) {
+                    DisabledPluginList(ids: disabled)
+                }
+            }
+            Spacer()
+            Button(language == .zh ? "退出安全模式" : "Exit Safe Mode", action: onExit)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.12))
+    }
+
+    private var title: String {
+        if disabled.isEmpty {
+            return language == .zh
+                ? "安全模式：未发现可停用的第三方插件"
+                : "Safe mode: no third-party plugins found to disable"
+        }
+        return language == .zh
+            ? "安全模式：已临时停用 \(disabled.count) 个第三方插件"
+            : "Safe mode: \(disabled.count) third-party plugin(s) temporarily disabled"
+    }
+}
+
+/// 被停用插件的清单。列出 id 而不是只报个数：用户要凭它判断该卸载哪一个。
+struct DisabledPluginList: View {
+    let ids: [String]
+
+    private var language: AppLanguage { MenuBuilder.current }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(language == .zh ? "本次停用的插件" : "Disabled in this session")
+                .font(.headline)
+            Text(language == .zh
+                 ? "退出安全模式后它们会重新启用。"
+                 : "They are re-enabled when you exit safe mode.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(ids, id: \.self) { id in
+                        Text(id)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 240)
+        }
+        .padding(14)
+        .frame(width: 320)
     }
 }
 
