@@ -24,6 +24,13 @@ enum FailureCause: Equatable {
     case readinessTimeout(seconds: Int)
     /// 配置/凭据文件格式不符，dsh 拒绝启动。
     case invalidConfig(path: String, message: String)
+    /// 捆绑的 dsh 读不懂 `~/.dsh` 里的配置——版本错位，不是用户写错了文件。
+    ///
+    /// 与 `.invalidConfig` 是同一条日志、不同的处境：我们发的 dsh 是定版的，而 `~/.dsh`
+    /// 是用户与其它 dsh（例如官方 Electron 客户端）共用的状态。对方迁移过配置之后，我们
+    /// 这份就读不懂了。此时叫用户去 Finder 里手改 yaml 是把我们的版本问题摊给他，唯一
+    /// 靠得住的出路是改用他机器上那份更新的 dsh。
+    case runtimeVersionSkew(bundled: String?, path: String, message: String)
     /// 其它异常退出；`message` 是日志里能找到的最后一条报错。
     case abnormalExit(status: Int32, message: String?)
 
@@ -34,19 +41,29 @@ enum FailureCause: Equatable {
         case retry
         case viewLogs
         case exportDiagnostics
+        /// 打开「改用本机安装的 dsh」逃生开关并重启服务。
+        case useMachineRuntime
         /// 打开外部链接（如 Node 官网）。
         case open(URL)
         /// 在 Finder 中定位文件（如出错的配置文件）。
         case reveal(path: String)
 
-        /// 主按钮只允许一个：失败界面上如果有两个同等强调的按钮，用户就不知道该点哪个。
-        var isPrimary: Bool { self == .retry }
+        /// 这个动作有可能真的让服务跑起来（而不只是让用户看到更多信息）。
+        ///
+        /// 主按钮从这些里面挑，见 `FailureCause.primaryAction`。
+        var canResolve: Bool {
+            switch self {
+            case .retry, .useMachineRuntime: return true
+            case .viewLogs, .exportDiagnostics, .open, .reveal: return false
+            }
+        }
 
         func label(_ language: AppLanguage) -> String {
             switch self {
             case .retry: return language == .zh ? "重试" : "Retry"
             case .viewLogs: return language == .zh ? "查看日志" : "View Logs"
             case .exportDiagnostics: return language == .zh ? "导出诊断信息" : "Export Diagnostics"
+            case .useMachineRuntime: return language == .zh ? "改用本机的 dsh" : "Use This Machine's dsh"
             case .open: return language == .zh ? "前往下载" : "Open Download Page"
             case .reveal: return language == .zh ? "在 Finder 中显示" : "Show in Finder"
             }
@@ -57,6 +74,7 @@ enum FailureCause: Equatable {
             case .retry: return "arrow.clockwise"
             case .viewLogs: return "terminal"
             case .exportDiagnostics: return "stethoscope"
+            case .useMachineRuntime: return "shippingbox"
             case .open: return "arrow.up.right.square"
             case .reveal: return "folder"
             }
@@ -71,6 +89,10 @@ enum FailureCause: Equatable {
             return [.open(Self.nodeDownloadURL), .viewLogs, .retry]
         case .invalidConfig(let path, _):
             return [.reveal(path: path), .viewLogs, .retry]
+        // 逃生开关排在最前：这一类失败里「重试」必然再失败一次。`retry` 仍然留着，
+        // 因为手改过配置的用户需要一个不改运行时就能再试一次的入口。
+        case .runtimeVersionSkew(_, let path, _):
+            return [.useMachineRuntime, .reveal(path: path), .viewLogs, .retry]
         case .portExhausted:
             return [.viewLogs, .retry]
         case .npxTimeout, .npxUnavailable, .bootJSMissing:
@@ -78,6 +100,15 @@ enum FailureCause: Equatable {
         case .spawnFailed, .readinessTimeout, .abnormalExit:
             return [.viewLogs, .exportDiagnostics, .retry]
         }
+    }
+
+    /// 被强调的那个按钮。
+    ///
+    /// 主按钮属于「原因」而不是「动作」：同一个「重试」在多数失败里是正解，在版本错位
+    /// 里却注定再失败一次。放在动作上（`self == .retry`）就没法表达这个区别，两个都强调
+    /// 又等于没强调。取动作列表里第一个「可能真的解决问题」的动作，因此顺序即优先级。
+    var primaryAction: RecoveryAction? {
+        actions.first(where: \.canResolve)
     }
 
     static let nodeDownloadURL = URL(string: "https://nodejs.org/en/download")!
@@ -102,6 +133,8 @@ enum FailureCause: Equatable {
             return language == .zh ? "服务启动后无响应" : "Service never became ready"
         case .invalidConfig:
             return language == .zh ? "配置文件格式不符" : "Invalid configuration file"
+        case .runtimeVersionSkew:
+            return language == .zh ? "内置的 dsh 版本对不上" : "Bundled dsh version mismatch"
         case .abnormalExit:
             return language == .zh ? "服务异常退出" : "Service exited unexpectedly"
         }
@@ -152,6 +185,15 @@ enum FailureCause: Equatable {
             return zh
                 ? "dsh 拒绝启动，因为 \(path) 的内容不符合它期望的格式：\(message)。这个文件可能被另一个版本的 dsh 写过。"
                 : "dsh refused to start because \(path) does not match the format it expects: \(message). Another version of dsh may have written this file."
+        case .runtimeVersionSkew(let bundled, let path, let message):
+            // 点名内置版本：用户看不到 manifest.json，不写版本他就无从判断该等我们更新
+            // 还是自己动手。manifest 缺失时也不能出现「内置版本 nil」这种文案。
+            let version = bundled ?? (zh ? "版本未知" : "version unknown")
+            return zh
+                ? "应用内置的 dsh（\(version)）读不懂 \(path)：\(message)。这通常是因为你机器上有更新版本的 dsh 改写过这个文件——它不是你写错了，内置的这份也改不了。打开「改用本机安装的 dsh」即可用你机器上那份启动。"
+                : "The dsh bundled with the app (\(version)) cannot read \(path): \(message). "
+                    + "A newer dsh on this machine has most likely rewritten that file — nothing is wrong with your config, "
+                    + "and the bundled copy cannot be changed. Turn on “Use the dsh installed on this machine” to start with that one instead."
         case .abnormalExit(let status, let message):
             let tail = message.map { zh ? "最后一条报错：\($0)" : "Last error: \($0)" } ?? (zh ? "日志里没有明确的报错。" : "The log contains no explicit error.")
             return zh
@@ -171,6 +213,7 @@ enum FailureCause: Equatable {
         case .spawnFailed: return "spawnFailed"
         case .readinessTimeout: return "readinessTimeout"
         case .invalidConfig: return "invalidConfig"
+        case .runtimeVersionSkew: return "runtimeVersionSkew"
         case .abnormalExit(let status, _): return "abnormalExit(\(status))"
         }
     }
@@ -193,19 +236,46 @@ enum FailureCause: Equatable {
     /// 服务端报错行的特征。
     private static let errorMarkers = ["Error:", "error:", "ERR!", "Exception", "FATAL", "fatal:", "panic:"]
 
+    /// 分类时需要知道的运行时事实。
+    ///
+    /// 由调用方注入而不是让 `FailureCause` 自己去读 `Bundle`/`UserDefaults`：同一条日志
+    /// 在捆绑运行时下是版本错位、在本机运行时下是配置错误，而分类必须保持是纯函数。
+    struct RuntimeContext: Equatable {
+        /// 本次实际启动用的是哪一份；nil 表示还不知道。
+        let source: RuntimeSource?
+        /// 捆绑运行时的版本摘要（`RuntimeManifest.summary`）。
+        let bundledVersion: String?
+
+        /// 不知道跑的是哪一份时用它。
+        static let unknown = RuntimeContext(source: nil, bundledVersion: nil)
+    }
+
     /// 依据退出码与日志尾部推断原因。
     ///
     /// 顺序有意为之：先找日志里已经写明原因的行（配置错误），找不到才退回「未知退出」。
     /// 反过来的话，本机上最真实的一次失败——dsh 因 `.credentials.yaml` 版本字段类型不符
     /// 而拒绝启动——只会显示成「exit 1」。
-    static func classify(exitStatus: Int32, logTail: [String]) -> FailureCause {
+    ///
+    /// `runtime` 决定配置格式错误落到哪一类：只有确知跑的是捆绑那份时才说「版本错位」并
+    /// 推荐逃生开关。本机运行时下那个开关已经开着，说不知道时推荐一个可能毫无作用的开关
+    /// 比让用户去看文件更糟，所以两种情况都退回 `.invalidConfig`。
+    static func classify(
+        exitStatus: Int32,
+        logTail: [String],
+        runtime: RuntimeContext = .unknown
+    ) -> FailureCause {
         let lines = logTail
             .map(strippingTimestamp)
             .filter { !$0.contains(ownPrefix) && !$0.isEmpty }
 
         for line in lines.reversed() {
             if let path = configFilePath(in: line) {
-                return .invalidConfig(path: path, message: line)
+                guard runtime.source == .bundled else {
+                    return .invalidConfig(path: path, message: line)
+                }
+                return .runtimeVersionSkew(
+                    bundled: runtime.bundledVersion, path: path, message: line
+                )
             }
         }
         let message = lines.last { line in errorMarkers.contains(where: line.contains) }

@@ -153,6 +153,10 @@ struct ContentView: View {
             app.showLogs = true
         case .exportDiagnostics:
             MenuActions.shared.exportDiagnostics()
+        case .useMachineRuntime:
+            // 开关立即生效：`ServerManager.launchServer()` 每次都重读这个偏好。
+            MachineRuntimePreference().set(true)
+            server.restart()
         case .open(let url):
             NSWorkspace.shared.open(url)
         case .reveal(let path):
@@ -268,7 +272,9 @@ struct FailureView: View {
                     } label: {
                         Label(action.label(language), systemImage: action.symbol)
                     }
-                    .buttonStyle(action.isPrimary ? AnyButtonStyle(.borderedProminent) : AnyButtonStyle(.bordered))
+                    .buttonStyle(action == cause.primaryAction
+                                 ? AnyButtonStyle(.borderedProminent)
+                                 : AnyButtonStyle(.bordered))
                 }
             }
         }
@@ -279,7 +285,7 @@ struct FailureView: View {
 /// 按钮样式的类型擦除。
 ///
 /// SwiftUI 的 `buttonStyle` 泛型参数无法在三元表达式里混用两种具体样式，
-/// 而失败态的按钮要按 `isPrimary` 逐个决定强调程度。
+/// 而失败态的按钮要按 `FailureCause.primaryAction` 逐个决定强调程度。
 struct AnyButtonStyle: PrimitiveButtonStyle {
     private let make: (Configuration) -> AnyView
 
