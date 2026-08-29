@@ -6,6 +6,8 @@
 #   BUILD    构建号（默认 1；CI 传入 git 计数）
 #   ARCHS    架构列表（默认 "arm64 x86_64"，单架构可传 ARCHS=arm64）
 #   NO_INSTALL=1  跳过安装到 ~/Applications（CI 用）
+#   BUNDLE_RUNTIME=1  把 pin 住的 node + dsh 备进 .app（只能单架构，见 vendor-runtime.sh）
+#   CODESIGN_IDENTITY 签名身份（默认本地自签名；分发用 "Developer ID Application: …"）
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -79,12 +81,75 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# 签名：优先用稳定自签名证书（CODESIGN_IDENTITY），保证 TCC 授权持久
-#（ad-hoc 每次构建签名变化，导致文件夹权限每次重新请求）
+# ---------- 捆绑运行时 ----------
+# 默认不备：日常 swift build / 本地迭代不需要多等一次 400 MB 的拷贝，`RuntimeLocator`
+# 找不到 runtime/ 时自动退回本机 node + npx 缓存。发布构建才开。
+if [ "${BUNDLE_RUNTIME:-}" = "1" ]; then
+  ARCH_LIST=($ARCHS)
+  if [ "${#ARCH_LIST[@]}" -gt 1 ]; then
+    echo "!! BUNDLE_RUNTIME=1 只能配单架构，当前 ARCHS=\"$ARCHS\"" >&2
+    echo "   dsh 树里的原生模块是按架构装的，universal 包装不进两份互斥的 node_modules。" >&2
+    echo "   发布按架构分开出包（见 .github/workflows/release.yml）。" >&2
+    exit 1
+  fi
+  echo "==> vendoring runtime (${ARCH_LIST[0]})"
+  ./scripts/vendor-runtime.sh "${ARCH_LIST[0]}" "$APP/Contents/Resources"
+fi
+
+# ---------- 签名 ----------
+# 默认用稳定的自签名证书，保证 TCC 授权持久（ad-hoc 每次构建签名都变，
+# 导致文件夹权限每次重新请求）。分发时传 Developer ID 身份。
 IDENTITY="${CODESIGN_IDENTITY:-Harness Local Signing}"
-echo "==> codesign ($IDENTITY)"
-codesign --force --deep --sign "$IDENTITY" "$APP" 2>/dev/null \
-  || codesign --force --deep --sign - "$APP"
+if [ "$IDENTITY" != "-" ] && ! security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
+  echo "==> 钥匙串里没有「${IDENTITY}」，退回 ad-hoc 签名（仅本机可用，不能分发）"
+  IDENTITY="-"
+fi
+
+# 安全时间戳要联网（Apple 的时间戳服务），且只对可分发签名有意义。本地签名一律关掉，
+# 免得离线构建卡在网络超时上。
+case "$IDENTITY" in
+  "Developer ID"*) TIMESTAMP=(--timestamp) ;;
+  *)               TIMESTAMP=(--timestamp=none) ;;
+esac
+
+# 加固运行时（--options runtime）是公证的前置条件，本地签名时一起开着，
+# 免得「本地能跑、公证版起不来」这种只在发布后才暴露的差异。
+sign() { # sign <entitlements|""> <path…>
+  local entitlements="$1"; shift
+  if [ -n "$entitlements" ]; then
+    codesign --force --sign "$IDENTITY" --options runtime "${TIMESTAMP[@]}" \
+      --entitlements "$entitlements" "$@"
+  else
+    codesign --force --sign "$IDENTITY" --options runtime "${TIMESTAMP[@]}" "$@"
+  fi
+}
+
+# 由内向外签：嵌套的 Mach-O 必须先各自签好，外层再封装。`--deep` 做的是同一件事，
+# 但它给所有嵌套代码套上同一份 entitlements，node 需要的 JIT 豁免会漏给应用本体，
+# 而且 Apple 已经明确不建议用它签名。
+RUNTIME_DIR="$APP/Contents/Resources/runtime"
+if [ -d "$RUNTIME_DIR" ]; then
+  echo "==> codesign 捆绑运行时里的 Mach-O"
+  SIGNED=0
+  # 候选：原生模块与带可执行位的文件。node_modules 里大量带可执行位的其实是 JS/shell
+  # 脚本，codesign 会直接报错，所以逐个用 file 判一次是不是 Mach-O。
+  while IFS= read -r -d '' candidate; do
+    case "$(/usr/bin/file -b "$candidate")" in
+      Mach-O*)
+        sign assets/runtime.entitlements "$candidate"
+        SIGNED=$((SIGNED + 1))
+        ;;
+    esac
+  done < <(find "$RUNTIME_DIR" -type f \
+             \( -name '*.node' -o -name '*.dylib' -o -name '*.so' -o -perm -u+x \) -print0)
+  echo "   - 已签名 $SIGNED 个 Mach-O"
+fi
+
+echo "==> codesign $APP ($IDENTITY)"
+sign "" "$APP"
+
+echo "==> 校验签名"
+codesign --verify --deep --strict --verbose=1 "$APP"
 
 if [ "${NO_INSTALL:-}" != "1" ]; then
   DEST="$HOME/Applications/$NAME.app"

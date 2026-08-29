@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  捆绑运行时（node 及其原生模块）的加固运行时豁免。
+
+  只给 node，不给应用本体：应用是普通的 SwiftUI + WKWebView 进程，不需要任何豁免，
+  而豁免范围越小越好——加固运行时的意义就在于此。
+
+  三条都是必需的，不是保险起见加的：
+  - allow-jit / allow-unsigned-executable-memory: V8 要把 JIT 出来的机器码写进可执行内存。
+    缺了它 node 在加固运行时下起不来，且报错发生在 V8 初始化里，没有任何可读信息。
+  - disable-library-validation: dsh 的插件生态允许用户装带原生模块的插件（.node），
+    那些是别人签的、甚至没签。库校验会拒绝 dlopen 它们，于是「装了插件就崩」。
+    这一条是有代价的（放宽了对加载库的来源要求），但插件能用是这个应用的前提。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>
