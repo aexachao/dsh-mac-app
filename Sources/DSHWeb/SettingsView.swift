@@ -1,8 +1,10 @@
 import SwiftUI
 
-/// 设置界面：界面语言切换（菜单栏文案），切换后重启应用生效。
+/// 设置界面：界面语言切换（切换后重启应用生效）、运行时来源（逃生开关）。
 struct SettingsView: View {
     @AppStorage("appLanguage") private var languageRaw = ""
+    /// 与 `MachineRuntimePreference` 同一个键；这里用 `@AppStorage` 只为让界面随之刷新。
+    @AppStorage("preferMachineRuntime") private var preferMachineRuntime = false
     @State private var showRestartAlert = false
     @State private var previousLanguage: AppLanguage = .zh
 
@@ -30,6 +32,10 @@ struct SettingsView: View {
                               substituting: ["language": effectiveLabel]))
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Divider().padding(.vertical, 4)
+
+            runtimeSection
         }
         .padding(20)
         .frame(width: 340)
@@ -41,6 +47,50 @@ struct SettingsView: View {
         } message: {
             Text(Strings.text(.restartAlertMessage, MenuBuilder.current))
         }
+    }
+
+    /// 运行时来源。
+    ///
+    /// 先写明内置的是哪个版本，再给开关：不写版本，「改用本机」就是一句没有对照物的
+    /// 抽象选项，用户无从判断该不该打开。
+    private var runtimeSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(Strings.text(.settingsRuntimeTitle, MenuBuilder.current))
+                .font(.headline)
+
+            if let summary = RuntimeLocator.bundledManifest()?.summary {
+                Text(Strings.text(.settingsRuntimeBundled, MenuBuilder.current,
+                                  substituting: ["runtime": summary]))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                // `swift run` 的开发构建走到这里，用户看到的是事实而不是空白
+                Text(Strings.text(.settingsRuntimeNoBundle, MenuBuilder.current))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Toggle(Strings.text(.settingsPreferMachine, MenuBuilder.current),
+                   isOn: preferMachineBinding)
+
+            Text(Strings.text(.settingsPreferMachineHint, MenuBuilder.current))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// 开关一动就重启服务。
+    ///
+    /// 不做成「下次启动生效」：用户打开它的时刻，正是当前这一份跑不起来的时刻，
+    /// 让他再自己去按一次重启只是多一道他不知道要按的手续。
+    private var preferMachineBinding: Binding<Bool> {
+        Binding(
+            get: { preferMachineRuntime },
+            set: { newValue in
+                preferMachineRuntime = newValue
+                ServerManager.shared.restart()
+            }
+        )
     }
 
     private var effectiveLabel: String {

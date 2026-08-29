@@ -13,7 +13,10 @@ struct DiagnosticsReportTests {
         logFiles: [String] = ["harness-2026-08-29.log"],
         nodePath: String? = "/Users/me/.nvm/versions/node/v24.13.0/bin/node",
         safeMode: Bool = false,
-        disabledPlugins: [String] = []
+        disabledPlugins: [String] = [],
+        runtimeSource: String? = "bundled",
+        bundledRuntime: String? = "dsh 0.1.1-rc.2 / node 24.20.0 (arm64)",
+        prefersMachineRuntime: Bool = false
     ) -> DiagnosticsReport.Environment {
         DiagnosticsReport.Environment(
             appVersion: "0.2.1",
@@ -29,8 +32,46 @@ struct DiagnosticsReportTests {
             logFiles: logFiles,
             generatedAt: Date(timeIntervalSince1970: 1_787_000_000),
             safeMode: safeMode,
-            disabledPlugins: disabledPlugins
+            disabledPlugins: disabledPlugins,
+            runtimeSource: runtimeSource,
+            bundledRuntime: bundledRuntime,
+            prefersMachineRuntime: prefersMachineRuntime
         )
+    }
+
+    // MARK: 运行时来源
+    //
+    // 捆绑之后，「哪一份运行时」是读 issue 时第一个要问的问题：捆绑那份跑不起来是我们发错了
+    // 版本，本机那份跑不起来是用户机器上的状态。报告分不清这两者，等于把最关键的一条线索
+    // 留给来回追问。
+
+    @Test func statesWhichRuntimeIsInUse() {
+        let report = DiagnosticsReport.render(environment: environment(runtimeSource: "machine"), logTail: [])
+        #expect(report.contains("machine"))
+    }
+
+    @Test func includesBundledRuntimeVersions() {
+        // 我们这一版捆绑了哪个 dsh，只能由应用自己报——用户看不到 manifest.json
+        let report = DiagnosticsReport.render(environment: environment(), logTail: [])
+        #expect(report.contains("dsh 0.1.1-rc.2 / node 24.20.0 (arm64)"))
+    }
+
+    @Test func marksMissingBundleExplicitly() {
+        // 开发构建（swift run）没有 .app 外壳，捆绑那份不存在；空白会被当成报告漏字段
+        let report = DiagnosticsReport.render(
+            environment: environment(runtimeSource: "machine", bundledRuntime: nil),
+            logTail: []
+        )
+        #expect(report.contains("未解析"))
+    }
+
+    @Test func statesTheEscapeHatchPreference() {
+        // 用户打开过「改用本机 dsh」又忘了，表现就是 dsh 版本莫名其妙地旧。
+        // 报告里写明这一条，能省掉一整轮来回追问。
+        let on = DiagnosticsReport.render(environment: environment(prefersMachineRuntime: true), logTail: [])
+        let off = DiagnosticsReport.render(environment: environment(prefersMachineRuntime: false), logTail: [])
+        #expect(on.contains("Prefer machine: on"))
+        #expect(off.contains("Prefer machine: off"))
     }
 
     // MARK: 安全模式

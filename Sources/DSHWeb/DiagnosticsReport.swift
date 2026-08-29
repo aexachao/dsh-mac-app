@@ -32,6 +32,15 @@ enum DiagnosticsReport {
         let safeMode: Bool
         /// 安全模式停用的插件 id。
         let disabledPlugins: [String]
+        /// 本次实际用的是哪一份运行时（`bundled` / `machine`）；nil 表示还没启动过。
+        ///
+        /// 捆绑之后这是读 issue 时第一个要问的问题：捆绑那份跑不起来是**我们**发错了版本，
+        /// 本机那份跑不起来是用户机器上的状态。报告分不清这两者，就得靠来回追问补上。
+        let runtimeSource: String?
+        /// 捆绑运行时的版本摘要（`RuntimeManifest.summary`）；nil 表示这份构建没有捆绑。
+        let bundledRuntime: String?
+        /// 「改用本机 dsh」逃生开关是否打开。
+        let prefersMachineRuntime: Bool
 
         init(
             appVersion: String,
@@ -47,7 +56,10 @@ enum DiagnosticsReport {
             logFiles: [String],
             generatedAt: Date,
             safeMode: Bool,
-            disabledPlugins: [String]
+            disabledPlugins: [String],
+            runtimeSource: String?,
+            bundledRuntime: String?,
+            prefersMachineRuntime: Bool
         ) {
             self.appVersion = appVersion
             self.appBuild = appBuild
@@ -63,6 +75,9 @@ enum DiagnosticsReport {
             self.generatedAt = generatedAt
             self.safeMode = safeMode
             self.disabledPlugins = disabledPlugins
+            self.runtimeSource = runtimeSource
+            self.bundledRuntime = bundledRuntime
+            self.prefersMachineRuntime = prefersMachineRuntime
         }
     }
 
@@ -81,6 +96,9 @@ enum DiagnosticsReport {
         out.append("- macOS: \(environment.osVersion)")
         out.append("- 架构 / Arch: \(environment.architecture)")
         out.append("- 界面语言 / Language: \(environment.language)")
+        out.append("- 运行时来源 / Runtime: \(environment.runtimeSource ?? unresolved)")
+        out.append("- 捆绑运行时 / Bundled: \(environment.bundledRuntime ?? unresolved)")
+        out.append("- 改用本机 dsh / Prefer machine: \(environment.prefersMachineRuntime ? "on" : "off")")
         out.append("- Node: \(environment.nodePath ?? unresolved)")
         out.append("- dsh 启动入口 / Boot: \(environment.bootJSPath ?? unresolved)")
         out.append("")

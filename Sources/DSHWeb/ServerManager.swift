@@ -33,6 +33,11 @@ final class ServerManager {
     private(set) var isSafeMode = false
     /// 安全模式本次停用的插件 id（界面列给用户看，让他知道少了什么）。
     private(set) var disabledPlugins: [String] = []
+    /// 本次实际启动用的运行时来源；nil 表示还没自己启动过（未启动或接管了外部实例）。
+    ///
+    /// 界面与诊断报告都要据此说不同的话：捆绑那份起不来是我们发错了版本，本机那份起不来
+    /// 是用户机器上的状态。
+    private(set) var runtimeSource: RuntimeSource?
 
     /// 界面用的就绪地址（由状态推导）。
     var webURL: URL? {
@@ -55,6 +60,8 @@ final class ServerManager {
     private let streak: UnhealthyStreakStore
     /// 「下次以安全模式启动」的持久化开关。
     private let safeMode: SafeModeStore
+    /// 「改用本机 dsh」逃生开关（默认关闭，见 `MachineRuntimePreference`）。
+    private let machineRuntime: MachineRuntimePreference
 
     // MARK: - 启动入口
 
@@ -63,12 +70,14 @@ final class ServerManager {
         logFile: LogFileSink = LogFileSink(),
         healthPolicy: StartupHealth.Policy = .standard,
         streak: UnhealthyStreakStore = UnhealthyStreakStore(),
-        safeMode: SafeModeStore = SafeModeStore()
+        safeMode: SafeModeStore = SafeModeStore(),
+        machineRuntime: MachineRuntimePreference = MachineRuntimePreference()
     ) {
         self.logFile = logFile
         self.healthPolicy = healthPolicy
         self.streak = streak
         self.safeMode = safeMode
+        self.machineRuntime = machineRuntime
     }
 
     /// 应用启动时调用：先看默认端口上是否已有 dsh 服务，再决定接管还是自己启动。
@@ -195,7 +204,10 @@ final class ServerManager {
 
     private func launchServer() {
         state = .starting
-        guard let node = resolveNode() else {
+        // 先定运行时：捆绑那份齐全时用它，否则退回本机的 node + npx 缓存。
+        // 判定本身是纯函数（`RuntimeLocator.plan`），这里只负责把磁盘上的事实喂给它。
+        let plan = runtimePlan()
+        if case .noNode = plan {
             fail(.nodeMissing)
             return
         }
@@ -207,23 +219,63 @@ final class ServerManager {
             log("[dsh-web] 端口 \(PortStrategy.defaultPort) 已被占用，本次改用 \(chosen)。")
         }
         port = chosen
-        log("[dsh-web] 使用 Node: \(node.path)")
         let overlay = prepareSafeModeIfNeeded()
-        Task {
-            // 优化：缓存里已有 dsh 启动入口时直接使用，跳过 npx 网络检查（省 3-5s）
-            if let boot = self.resolveBootJS() {
-                self.spawnServer(node: node, bootJS: boot, overlay: overlay)
-                return
-            }
+
+        switch plan {
+        case .noNode:
+            return // 已在上面处理
+        case .ready(let node, let bootJS, let source):
+            // 捆绑齐全时一步都不用等：既不查网络，也不跑 npx。
+            announce(source: source, node: node)
+            spawnServer(node: node, bootJS: bootJS, overlay: overlay, source: source)
+        case .needsInstall(let node):
+            // 走到这里意味着本机没有 dsh 缓存，且没有可用的捆绑副本（或用户明确要求
+            // 用本机那份）。这一步是几百 MB 的下载，不是几秒钟。
+            announce(source: .machine, node: node)
             log("[dsh-web] 未找到 dsh 缓存，先通过 npx 安装…")
-            let ok = await self.ensurePackage(node: node)
-            guard ok else { return } // fail 已由 ensurePackage 处理
-            guard let boot = self.resolveBootJS() else {
-                self.fail(.bootJSMissing)
-                return
+            Task {
+                let ok = await self.ensurePackage(node: node)
+                guard ok else { return } // fail 已由 ensurePackage 处理
+                guard let boot = self.resolveBootJS() else {
+                    self.fail(.bootJSMissing)
+                    return
+                }
+                self.spawnServer(node: node, bootJS: boot, overlay: overlay, source: .machine)
             }
-            self.spawnServer(node: node, bootJS: boot, overlay: overlay)
         }
+    }
+
+    /// 本次（或下一次）启动会用哪一份运行时。
+    ///
+    /// 采集磁盘事实 + 读逃生开关，判定交给纯函数。诊断报告也用它，所以报告里写的就是
+    /// 真的会被用上的那份，而不是另算一遍。
+    private func runtimePlan() -> RuntimePlan {
+        RuntimeLocator.plan(
+            bundledNode: RuntimeLocator.bundledNode(),
+            bundledBootJS: RuntimeLocator.bundledBootJS(),
+            machineNode: resolveNode(),
+            machineBootJS: resolveBootJS(),
+            preferMachine: machineRuntime.isEnabled
+        )
+    }
+
+    /// 把「这次用的是哪一份」写进日志。
+    ///
+    /// 捆绑那份要连版本一起写：用户看不到 manifest.json，而「我们发的是哪个 dsh」是
+    /// 读 issue 时第一个要确认的事实。
+    private func announce(source: RuntimeSource, node: URL) {
+        switch source {
+        case .bundled:
+            let versions = RuntimeLocator.bundledManifest()?.summary ?? "版本未知"
+            log("[dsh-web] 使用捆绑运行时: \(versions)")
+        case .machine:
+            log("[dsh-web] 使用本机运行时: \(node.path)")
+        }
+    }
+
+    /// 分类失败时要用到的运行时事实（见 `FailureCause.RuntimeContext`）。
+    private func runtimeContext() -> FailureCause.RuntimeContext {
+        .init(source: runtimeSource, bundledVersion: RuntimeLocator.bundledManifest()?.summary)
     }
 
     /// 确保 npx 缓存里已有 @deepseek-ai/dsh（静默安装）。
@@ -273,7 +325,8 @@ final class ServerManager {
     /// 以 node 直接运行 dsh 启动入口（单一直接子进程，便于退出清理）。
     ///
     /// 参数形式与其中的约束见 `ServerArguments`。
-    private func spawnServer(node: URL, bootJS: URL, overlay: URL? = nil) {
+    private func spawnServer(node: URL, bootJS: URL, overlay: URL? = nil, source: RuntimeSource) {
+        runtimeSource = source
         let p = Process()
         p.executableURL = node
         p.arguments = ServerArguments.spawn(bootJS: bootJS.path, port: port, overlay: overlay?.path)
@@ -293,9 +346,13 @@ final class ServerManager {
                 self.settleHealth()
                 // 从日志尾部推断真正的原因：dsh 拒绝启动时会把理由写在退出前的最后几行，
                 // 只报 exit code 等于把唯一有用的线索丢掉。
+                //
+                // 带上运行时事实：同一条「配置格式不符」在捆绑运行时下是我们的版本与用户
+                // `~/.dsh` 错位（该推逃生开关），在本机运行时下才是配置本身的问题。
                 self.fail(FailureCause.classify(
                     exitStatus: p.terminationStatus,
-                    logTail: Array(self.logLines.suffix(Self.classificationTailLines))
+                    logTail: Array(self.logLines.suffix(Self.classificationTailLines)),
+                    runtime: self.runtimeContext()
                 ))
             }
         }
@@ -560,13 +617,16 @@ final class ServerManager {
     /// 报告内容由 `DiagnosticsReport` 统一脱敏，这里只负责采集事实。
     func diagnosticsReport(tailLines: Int = 200, now: Date = Date()) -> String {
         logFile.flush()
+        // 路径取自同一个 plan，报告里写的就是真会被用上的那一份——分别再解析一次，
+        // 报告和实际启动就可能各说一套。
+        let plan = runtimePlan()
         let environment = DiagnosticsReport.Environment(
             appVersion: Self.bundleValue("CFBundleShortVersionString"),
             appBuild: Self.bundleValue("CFBundleVersion"),
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             architecture: Self.architecture,
-            nodePath: resolveNode()?.path,
-            bootJSPath: resolveBootJS()?.path,
+            nodePath: Self.nodePath(of: plan),
+            bootJSPath: Self.bootJSPath(of: plan),
             port: port,
             state: Self.describe(state),
             language: MenuBuilder.current.rawValue,
@@ -574,9 +634,49 @@ final class ServerManager {
             logFiles: logFile.ownedFileNames(),
             generatedAt: now,
             safeMode: isSafeMode,
-            disabledPlugins: disabledPlugins
+            disabledPlugins: disabledPlugins,
+            runtimeSource: runtimeSourceDescription(plan: plan),
+            bundledRuntime: RuntimeLocator.bundledManifest()?.summary,
+            prefersMachineRuntime: machineRuntime.isEnabled
         )
         return DiagnosticsReport.render(environment: environment, logTail: Array(logLines.suffix(tailLines)))
+    }
+
+    /// 报告里的运行时来源。
+    ///
+    /// 分三种写法而不是一种：已经跑起来的报实际用的那份，接管的外部实例报 `external`
+    /// （它不是我们启动的，两份路径都不代表它），还没跑起来的报「下次会用哪份」并标上
+    /// planned——把猜测写成事实，会让排障从一条错线索开始。
+    private func runtimeSourceDescription(plan: RuntimePlan) -> String? {
+        if case .external = state { return "external" }
+        if let runtimeSource { return Self.label(runtimeSource) }
+        switch plan {
+        case .ready(_, _, let source): return "\(Self.label(source)) (planned)"
+        case .needsInstall: return "machine (planned, needs install)"
+        case .noNode: return nil
+        }
+    }
+
+    private static func label(_ source: RuntimeSource) -> String {
+        switch source {
+        case .bundled: return "bundled"
+        case .machine: return "machine"
+        }
+    }
+
+    private static func nodePath(of plan: RuntimePlan) -> String? {
+        switch plan {
+        case .ready(let node, _, _): return node.path
+        case .needsInstall(let node): return node.path
+        case .noNode: return nil
+        }
+    }
+
+    private static func bootJSPath(of plan: RuntimePlan) -> String? {
+        switch plan {
+        case .ready(_, let bootJS, _): return bootJS.path
+        case .needsInstall, .noNode: return nil
+        }
     }
 
     /// 状态的可读描述（报告用；不本地化，便于在 issue 里直接匹配代码）。

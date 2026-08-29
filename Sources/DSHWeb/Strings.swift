@@ -60,6 +60,11 @@ enum Strings {
         case settingsTitle
         case settingsLanguage
         case settingsEffective
+        case settingsRuntimeTitle
+        case settingsRuntimeBundled
+        case settingsRuntimeNoBundle
+        case settingsPreferMachine
+        case settingsPreferMachineHint
         case restartAlertTitle
         case restartAlertMessage
         case cancel
@@ -126,6 +131,21 @@ enum Strings {
         case .settingsEffective:
             LocalizedText(zh: "当前生效：{language}（切换后需重启应用生效）",
                           en: "In effect: {language} (switching takes effect after a restart)")
+        case .settingsRuntimeTitle:
+            LocalizedText(zh: "运行时", en: "Runtime")
+        case .settingsRuntimeBundled:
+            LocalizedText(zh: "应用内置：{runtime}", en: "Bundled with the app: {runtime}")
+        case .settingsRuntimeNoBundle:
+            LocalizedText(zh: "这份构建没有内置运行时，使用本机的 Node 与 dsh。",
+                          en: "This build has no bundled runtime; it uses the Node and dsh on this machine.")
+        case .settingsPreferMachine:
+            LocalizedText(zh: "改用本机安装的 dsh", en: "Use the dsh installed on this machine")
+        case .settingsPreferMachineHint:
+            LocalizedText(zh: "内置的 dsh 与你 ~/.dsh 里的配置对不上时才需要打开它。"
+                            + "打开后会重启服务，并改用本机的 Node 与 dsh（缺少时先下载，需要十几分钟）。",
+                          en: "Only needed when the bundled dsh cannot read the config in your ~/.dsh. "
+                            + "Turning it on restarts the service using this machine's Node and dsh "
+                            + "(downloading it first, which can take over ten minutes).")
         case .restartAlertTitle:
             LocalizedText(zh: "重启应用以生效？", en: "Restart to apply?")
         case .restartAlertMessage:
