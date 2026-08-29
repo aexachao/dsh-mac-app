@@ -12,14 +12,7 @@ enum SafeModeOverlay {
 
     /// overlay 的默认位置。
     static var defaultURL: URL {
-        applicationSupportDirectory.appendingPathComponent("safe-mode.yml")
-    }
-
-    /// 应用自己的支持目录。
-    static var applicationSupportDirectory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        return base.appendingPathComponent("Harness")
+        AppDirectories.support.appendingPathComponent("safe-mode.yml")
     }
 
     /// dsh 的 web profile 目录：插件清单从这里静态读出。

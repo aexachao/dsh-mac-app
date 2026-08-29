@@ -20,6 +20,7 @@
 ## 功能
 
 - **服务生命周期** — 打开启动 / 退出停止；`⌘⇧R` 彻底重启（自动清理残留进程），插件或配置变更一次生效
+- **单实例** — 重复打开（含 `open -n`、两份不同路径的拷贝）只会把已有窗口叫到前台，不会起第二个服务去抢同一份 `~/.dsh` 配置
 - **快速启动** — 缓存存在时跳过网络检查，2 秒内就绪；端口可连即显示界面
 - **日志面板** — 菜单 `⌘⇧L` 打开独立日志窗口；启动失败时主界面自动展开错误日志；密钥、Cookie、OAuth 回调参数在写入前自动脱敏，日志可直接贴到 issue
 - **失败可自救** — 启动失败按原因分类，直接给出下一步（缺 Node 给下载入口、配置出错在 Finder 中定位、异常退出附最后一条报错并可导出诊断）
@@ -48,6 +49,7 @@ swift test
 - 原生 SwiftUI + WKWebView（无 Electron），AppKit 手动入口掌控菜单与窗口
 - 服务以 `node <dsh boot> web` 直接子进程运行，退出时干净终止
 - `ServerManager` 状态机：`starting / running / external / failed`；显式指定端口、冲突时退让、只清理可确认的 dsh 残留进程
+- 单实例锁用 `flock` 而非 pid 文件（`~/Library/Application Support/Harness/instance.lock`）：锁随进程消失，崩溃后不会留下解不开的死锁；抢不到锁就激活已有实例并退出
 - 安全模式：静态扫描 `~/.dsh/profiles/web` 的 `package.json` + 各 bundle 的 `cordis.patch.yml` 得到插件清单（不需要 dsh 能启动），把「停用第三方插件」写成 `~/Library/Application Support/Harness/safe-mode.yml`，以 `--patch` 叠加
 - 日志脱敏后同时进内存缓冲区与 `~/Library/Logs/Harness/`（分段轮转、目录总量封顶、只清理自己写的文件）；「文件 → 导出诊断信息…」可一键导出环境与最近日志
 - 菜单栏中英文两套，语言偏好同步写入 dsh 的 `~/.dsh/settings.yaml`（`locale.preference`）
@@ -58,6 +60,9 @@ swift test
 Sources/DSHWeb/
 ├── main.swift               # AppKit 入口（菜单不被 SwiftUI 覆盖）
 ├── DSHWebApp.swift          # 应用生命周期与窗口创建
+├── AppDirectories.swift     # 应用自己的目录（Application Support/Harness）
+├── InstanceLock.swift       # 单实例锁（flock，崩溃后自动释放）
+├── AppRelaunch.swift        # 自重启：等旧进程真正退出后再 open
 ├── ServerManager.swift      # 服务进程：启动/停止/重启/日志/状态机
 ├── PortStrategy.swift       # 端口选择策略 + 本地端口占用判定
 ├── DSHProcessIdentity.swift # 核对进程确实是 dsh（接管或清理前）
