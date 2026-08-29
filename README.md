@@ -45,7 +45,7 @@ swift test
 
 - 原生 SwiftUI + WKWebView（无 Electron），AppKit 手动入口掌控菜单与窗口
 - 服务以 `node <dsh boot> web` 直接子进程运行，退出时干净终止
-- `ServerManager` 状态机：`starting / running / external / failed`；端口探测、残留进程清理（lsof）
+- `ServerManager` 状态机：`starting / running / external / failed`；显式指定端口、冲突时退让、只清理可确认的 dsh 残留进程
 - 菜单栏中英文两套，语言偏好同步写入 dsh 的 `~/.dsh/settings.yaml`（`locale.preference`）
 
 ## 目录结构

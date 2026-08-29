@@ -25,7 +25,8 @@ final class ServerManager {
 
     private(set) var state: ServerState = .starting
     private(set) var logLines: [String] = []
-    private(set) var port = 3080
+    /// 本次运行实际使用的端口（启动时选定后不再变化，直到下次重启）。
+    private(set) var port = PortStrategy.defaultPort
 
     /// 界面用的就绪地址（由状态推导）。
     var webURL: URL? {
@@ -43,18 +44,43 @@ final class ServerManager {
 
     // MARK: - 启动入口
 
-    /// 应用启动时调用：先探测端口，再决定接管还是直接连接。
+    /// 应用启动时调用：先看默认端口上是否已有 dsh 服务，再决定接管还是自己启动。
     func start() {
         guard process == nil else { return }
         log("[dsh-web] 启动中…")
         Task {
-            if await probePort(port) {
-                state = .external(port: port)
-                log("[dsh-web] 检测到 127.0.0.1:\(port) 已有服务在运行，直接连接。")
-            } else {
-                launchServer()
-            }
+            if await adoptExternalService(on: PortStrategy.defaultPort) { return }
+            launchServer()
         }
+    }
+
+    /// 尝试接管端口上已有的服务。
+    ///
+    /// 只有确认监听方确实是 dsh 才接管——否则会把用户其它本地服务的页面加载进应用窗口。
+    /// 占用者是 dsh 但还没响应（通常正在初始化）时也不接管：宁可自己另起一个端口，也不
+    /// 让界面卡在一个可能已经僵死的进程上。
+    /// - Returns: 已接管并进入 `.external` 时为 true。
+    private func adoptExternalService(on candidate: Int) async -> Bool {
+        // lsof/ps 是毫秒级查询，且只在端口确实被占用时才会走到。
+        let listeners = DSHProcessIdentity.listenerPIDs(on: candidate)
+        guard !listeners.isEmpty else { return false }
+
+        let dshPIDs = listeners.filter { pid in
+            guard let command = DSHProcessIdentity.commandLine(pid: pid) else { return false }
+            return DSHProcessIdentity.isDSHBoot(commandLine: command)
+        }
+        guard !dshPIDs.isEmpty else {
+            log("[dsh-web] 端口 \(candidate) 被非 dsh 进程占用（\(describe(listeners))），改用其它端口。")
+            return false
+        }
+        guard await probePort(candidate) else {
+            log("[dsh-web] 端口 \(candidate) 上的 dsh 进程尚未响应，改为自行启动服务。")
+            return false
+        }
+        port = candidate
+        state = .external(port: candidate)
+        log("[dsh-web] 检测到 127.0.0.1:\(candidate) 已有 dsh 服务（\(describe(dshPIDs))），直接连接。")
+        return true
     }
 
     /// 停止服务进程（退出/重试前调用）。
@@ -68,52 +94,71 @@ final class ServerManager {
         }
     }
 
-    /// 重启：彻底重启 — 停自己的进程、等待端口释放、
-    /// 清理占用端口的残留进程，然后启动新服务（保证插件/配置变更生效）。
+    /// 重启：彻底重启 — 停自己的进程、等待端口释放、清理**可确认的** dsh 残留进程，
+    /// 然后启动新服务（保证插件/配置变更生效）。
     func restart() {
         stop()
         state = .starting
         log("[dsh-web] 重新启动（彻底重启，加载最新配置）…")
         Task {
-            // 1. 等待自己终止的进程释放端口（最多 5s）
-            for _ in 0..<25 {
-                if !(await probePort(port)) { break }
-                try? await Task.sleep(for: .milliseconds(200))
+            // 1. 等自己刚终止的进程释放端口（最多 5s）
+            await waitForPortRelease(port)
+            // 2. 仍被占用 → 只终止确认是 dsh 的残留进程，其它进程一律不碰
+            if !LocalPort.isFree(port) {
+                terminateVerifiedDSHListeners(on: port)
+                await waitForPortRelease(port, attempts: 15)
             }
-            // 2. 端口仍被占用 → 是外部残留进程，接管并清理
-            if await probePort(port) {
-                log("[dsh-web] 端口 \(port) 被残留进程占用，清理后重启…")
-                killPortOwner(port)
-                for _ in 0..<15 {
-                    if !(await probePort(port)) { break }
-                    try? await Task.sleep(for: .milliseconds(200))
-                }
-            }
+            // 3. 端口还是拿不回来时，launchServer 会自动退让到下一个空闲端口
             launchServer()
         }
     }
 
-    /// 杀掉占用指定端口的进程（lsof 定位 PID）。
-    private func killPortOwner(_ port: Int) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
-        task.arguments = ["-tiTCP:\(port)", "-sTCP:LISTEN"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = Pipe()
-        do {
-            try task.run()
-            task.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8) else { return }
-            let pids = output.split(whereSeparator: \.isNewline).compactMap { Int($0) }
-            for pid in pids where pid > 1 {
-                log("[dsh-web] 终止残留进程 PID \(pid)")
-                kill(pid_t(pid), SIGTERM)
-            }
-        } catch {
-            log("[dsh-web] 清理端口失败: \(error.localizedDescription)")
+    /// 轮询等待端口被释放（每 200ms 一次）。
+    ///
+    /// 用「能否绑定」判定而不是 HTTP 探测：dsh 从监听到能响应 HTTP 有数十秒窗口，
+    /// HTTP 探测会把正在初始化的服务误判为端口已释放。
+    private func waitForPortRelease(_ port: Int, attempts: Int = 25) async {
+        for _ in 0..<attempts {
+            if LocalPort.isFree(port) { return }
+            try? await Task.sleep(for: .milliseconds(200))
         }
+    }
+
+    /// 终止占用指定端口、且命令行可确认为 dsh 启动入口的进程。
+    ///
+    /// 早期实现直接 SIGTERM 所有监听该端口的 PID，会杀掉用户完全无关的服务。
+    /// 现在核对不通过就保持不动，并把这一决定写进日志。
+    private func terminateVerifiedDSHListeners(on port: Int) {
+        let listeners = DSHProcessIdentity.listenerPIDs(on: port)
+        guard !listeners.isEmpty else { return }
+
+        var terminated: [Int] = []
+        for pid in listeners {
+            guard let command = DSHProcessIdentity.commandLine(pid: pid),
+                  DSHProcessIdentity.isDSHBoot(commandLine: command) else {
+                log("[dsh-web] 端口 \(port) 的占用者 \(describe([pid])) 不是 dsh 进程，保持不动。")
+                continue
+            }
+            kill(pid_t(pid), SIGTERM)
+            terminated.append(pid)
+        }
+        if !terminated.isEmpty {
+            log("[dsh-web] 已终止 dsh 残留进程 \(describe(terminated))。")
+        }
+    }
+
+    /// 把 PID 列表描述成日志可读的形式。
+    ///
+    /// 只取可执行文件名，不写完整命令行——别的进程的启动参数可能含敏感信息。
+    private func describe(_ pids: [Int]) -> String {
+        pids.map { pid in
+            guard let command = DSHProcessIdentity.commandLine(pid: pid),
+                  let executable = command.split(separator: " ").first,
+                  let name = executable.split(separator: "/").last else {
+                return "PID \(pid)"
+            }
+            return "PID \(pid) \(name)"
+        }.joined(separator: ", ")
     }
 
     // MARK: - 服务进程
@@ -124,6 +169,14 @@ final class ServerManager {
             fail("找不到 Node.js。请先安装 Node（如 brew install node 或 nvm）。")
             return
         }
+        guard let chosen = PortStrategy.firstAvailable(from: PortStrategy.defaultPort, isAvailable: LocalPort.isFree) else {
+            fail("从 \(PortStrategy.defaultPort) 起连续 \(PortStrategy.scanLimit) 个端口都被占用，请释放端口后重试。")
+            return
+        }
+        if chosen != PortStrategy.defaultPort {
+            log("[dsh-web] 端口 \(PortStrategy.defaultPort) 已被占用，本次改用 \(chosen)。")
+        }
+        port = chosen
         log("[dsh-web] 使用 Node: \(node.path)")
         Task {
             // 优化：缓存里已有 dsh 启动入口时直接使用，跳过 npx 网络检查（省 3-5s）
@@ -178,10 +231,15 @@ final class ServerManager {
     }
 
     /// 以 node 直接运行 dsh 启动入口（单一直接子进程，便于退出清理）。
+    ///
+    /// 用 `--profile web` 而不是 `dsh web` 子命令形式：后者是前者的别名，且拒收
+    /// `--patch` 等父级参数（`web takes none of parent --profile, --patch, …`），
+    /// 而端口与后续的安全模式 overlay 都要从父级参数传入。
     private func spawnServer(node: URL, bootJS: URL) {
         let p = Process()
         p.executableURL = node
-        p.arguments = [bootJS.path, "web"]
+        // 端口显式传入：不再假设 dsh 的默认端口与本应用的假设一致。
+        p.arguments = [bootJS.path, "--profile", "web", "--port", String(port)]
         p.currentDirectoryURL = homeDir
         p.environment = environment(node: node)
 
@@ -348,7 +406,10 @@ final class ServerManager {
         ]
     }
 
-    /// 探测端口是否已有 HTTP 服务响应。
+    /// 探测端口上是否已有 HTTP 服务响应。
+    ///
+    /// 只回答「有没有 HTTP 服务在响应」，不回答「是不是 dsh」——身份判定由
+    /// `DSHProcessIdentity` 按进程命令行核对。
     private func probePort(_ port: Int) async -> Bool {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!)
         request.timeoutInterval = 1.5
