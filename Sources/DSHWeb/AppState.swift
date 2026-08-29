@@ -15,4 +15,11 @@ final class AppState {
 
     /// 服务管理器（菜单里的「在浏览器中打开」需要 URL）。
     let server = ServerManager.shared
+
+    private init() {
+        // 页面加载完成是启动健康判定的必要条件之一，转交给服务管理器。
+        webController.onPageLoaded = { [server] in
+            server.notePageLoaded()
+        }
+    }
 }

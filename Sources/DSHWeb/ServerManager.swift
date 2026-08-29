@@ -27,6 +27,8 @@ final class ServerManager {
     private(set) var logLines: [String] = []
     /// 本次运行实际使用的端口（启动时选定后不再变化，直到下次重启）。
     private(set) var port = PortStrategy.defaultPort
+    /// 最近一次启动的健康判定结果（界面与安全模式都读它）。
+    private(set) var health: StartupHealth.Outcome = .pending
 
     /// 界面用的就绪地址（由状态推导）。
     var webURL: URL? {
@@ -43,12 +45,22 @@ final class ServerManager {
     private let maxLogLines = 5000
     /// 日志落盘。内存缓冲区随进程消失，而「打开就退出」这类问题只能靠落盘回看。
     private let logFile: LogFileSink
+    /// 本次启动的健康观察；nil 表示当前没有自己启动的进程在观察窗口内。
+    private var observation: StartupHealth.Observation?
+    private let healthPolicy: StartupHealth.Policy
+    private let streak: UnhealthyStreakStore
 
     // MARK: - 启动入口
 
     /// 日志落盘目标可注入，便于单测用临时目录。
-    init(logFile: LogFileSink = LogFileSink()) {
+    init(
+        logFile: LogFileSink = LogFileSink(),
+        healthPolicy: StartupHealth.Policy = .standard,
+        streak: UnhealthyStreakStore = UnhealthyStreakStore()
+    ) {
         self.logFile = logFile
+        self.healthPolicy = healthPolicy
+        self.streak = streak
     }
 
     /// 应用启动时调用：先看默认端口上是否已有 dsh 服务，再决定接管还是自己启动。
@@ -258,6 +270,9 @@ final class ServerManager {
             Task { @MainActor in
                 guard let self, self.process === p else { return }
                 self.process = nil
+                self.observation?.exitedAt = Date()
+                self.observation?.exitStatus = p.terminationStatus
+                self.settleHealth()
                 self.fail("服务意外退出（exit \(p.terminationStatus)），详见日志。")
             }
         }
@@ -272,6 +287,7 @@ final class ServerManager {
         }
         process = p
         log("[dsh-web] 服务进程已启动 (PID \(p.processIdentifier))")
+        beginHealthObservation()
 
         // 快速就绪：端口可连接即视为就绪（不等 dsh 的完整初始化就绪行，
         // 那要 20-30s；页面由 dsh 前端自己的 loading 处理）。最多等 90s。
@@ -290,6 +306,60 @@ final class ServerManager {
                 }
                 try? await Task.sleep(for: .milliseconds(300))
             }
+        }
+    }
+
+    // MARK: - 启动健康判定
+
+    /// 开始观察本次启动：记下启动时刻，并起一个轮询判定的任务。
+    ///
+    /// 用轮询而不是纯事件驱动：判定依赖的三个事实里，「页面加载完成」和「进程退出」都有
+    /// 回调，但「存活时长」没有——只有时钟推进才能判出「页面 60s 还没加载完成」。
+    ///
+    /// 与端口探测的 `.running` 是两套判断，互不替代：探测让界面 2s 就出来，健康判定
+    /// 回答的是「这次到底算不算跑起来了」，后者才是安全模式的计数依据。
+    private func beginHealthObservation() {
+        observation = StartupHealth.Observation(spawnedAt: Date())
+        health = .pending
+        // 上一轮的观察任务在 observation 落定时就会退出，这里不会长期堆积。
+        Task { [weak self] in
+            while let self, self.observation != nil {
+                self.settleHealth()
+                if self.observation == nil { return }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    /// WebView 报告页面加载完成。
+    ///
+    /// 只认第一次：用户手动刷新页面不该把判定窗口重新拉长，否则一个反复刷新的用户
+    /// 永远判不出结果。
+    func notePageLoaded() {
+        guard observation != nil, observation?.pageLoadedAt == nil else { return }
+        observation?.pageLoadedAt = Date()
+        log("[dsh-web] 页面加载完成。")
+        settleHealth()
+    }
+
+    /// 有结论就落定，没结论就继续等。
+    ///
+    /// 幂等：落定后清掉 `observation`。退出回调与轮询任务会同时到达，不清就会重复计数，
+    /// 一次失败启动能把连续失败次数推进两三格，安全模式随之误触发。
+    private func settleHealth() {
+        guard let observation else { return }
+        let outcome = StartupHealth.evaluate(observation, now: Date(), policy: healthPolicy)
+        guard outcome != .pending else { return }
+        self.observation = nil
+        health = outcome
+        streak.record(outcome)
+        switch outcome {
+        case .healthy:
+            log("[dsh-web] 启动健康判定：正常。")
+        case .unhealthy(let reason):
+            log("[dsh-web] 启动健康判定：异常 —— \(reason)（连续 \(streak.value) 次）")
+        case .pending:
+            break
         }
     }
 

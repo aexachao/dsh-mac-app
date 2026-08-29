@@ -13,6 +13,12 @@ import SwiftUI
 final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     let webView: WKWebView
 
+    /// 页面加载完成回调。
+    ///
+    /// 用回调而不是直接调 `ServerManager`：健康判定的依赖方向应当是「服务管理器观察
+    /// WebView」，反过来会让 WebView 层依赖服务状态机，测试里也就没法单独构造它。
+    var onPageLoaded: (() -> Void)?
+
     private var activityToken: NSObjectProtocol?
 
     /// 全局链接拦截脚本：捕获被前端 JS preventDefault 吞掉的外链点击
@@ -123,6 +129,11 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHa
             NSWorkspace.shared.open(url)
         }
         decisionHandler(stay ? .allow : .cancel)
+    }
+
+    /// 页面加载完成 —— 健康判定的两个必要条件之一（另一个是最短存活时长）。
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        onPageLoaded?()
     }
 }
 
