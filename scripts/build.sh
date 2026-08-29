@@ -8,6 +8,7 @@
 #   NO_INSTALL=1  跳过安装到 ~/Applications（CI 用）
 #   BUNDLE_RUNTIME=1  把 pin 住的 node + dsh 备进 .app（只能单架构，见 vendor-runtime.sh）
 #   CODESIGN_IDENTITY 签名身份（默认本地自签名；分发用 "Developer ID Application: …"）
+#   NOTARIZE=1  签完后送 Apple 公证并装订票据（需要凭据，见 scripts/notarize.sh）
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -150,6 +151,14 @@ sign "" "$APP"
 
 echo "==> 校验签名"
 codesign --verify --deep --strict --verbose=1 "$APP"
+
+# ---------- 公证 ----------
+# 显式开关而不是"有 Developer ID 就自动公证"：公证要联网、要几分钟，本地用
+# 发布身份签一次只为验证签名链的场合不该被它拖住。装订在安装之前，
+# 这样 ~/Applications 里那份也带票据。
+if [ "${NOTARIZE:-}" = "1" ]; then
+  ./scripts/notarize.sh "$APP"
+fi
 
 if [ "${NO_INSTALL:-}" != "1" ]; then
   DEST="$HOME/Applications/$NAME.app"
