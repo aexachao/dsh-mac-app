@@ -65,6 +65,7 @@ Sources/DSHWeb/
 ├── InstanceLock.swift       # 单实例锁（flock，崩溃后自动释放）
 ├── AppRelaunch.swift        # 自重启：等旧进程真正退出后再 open
 ├── ServerManager.swift      # 服务进程：启动/停止/重启/日志/状态机
+├── ServerArguments.swift    # 拼给 dsh 的启动参数（纯函数）
 ├── PortStrategy.swift       # 端口选择策略 + 本地端口占用判定
 ├── DSHProcessIdentity.swift # 核对进程确实是 dsh（接管或清理前）
 ├── SecretMasker.swift       # 日志脱敏（密钥 / Cookie / OAuth 参数）

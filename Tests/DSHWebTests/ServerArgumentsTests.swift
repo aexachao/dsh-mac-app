@@ -1,0 +1,58 @@
+import Testing
+@testable import DSHWeb
+
+/// 拼给 node 的 dsh 启动参数。
+///
+/// 这些参数是应用与 dsh 之间唯一的接口，拼错的代价都是「启动看起来成功但行为不对」，
+/// 而不是编译错误，所以单独拎出来固定住。
+struct ServerArgumentsTests {
+
+    @Test func bootEntryComesFirst() {
+        // node 的第一个参数必须是脚本路径，否则 node 会把 --profile 当成自己的参数
+        let args = ServerArguments.spawn(bootJS: "/cache/lib/bin.js", port: 3080, overlay: nil)
+        #expect(args.first == "/cache/lib/bin.js")
+    }
+
+    @Test func usesProfileFormRatherThanTheWebSubcommand() {
+        // `dsh web` 是 `--profile web` 的别名，但拒收父级的 --patch/--port，
+        // 安全模式 overlay 与显式端口都得从父级参数进去
+        let args = ServerArguments.spawn(bootJS: "/cache/lib/bin.js", port: 3080, overlay: nil)
+        #expect(args.contains("--profile"))
+        #expect(args.contains("web"))
+    }
+
+    @Test func passesThePortExplicitly() {
+        // 端口由应用先 bind() 挑好再传给 dsh，不能依赖 dsh 自己的默认值
+        let args = ServerArguments.spawn(bootJS: "/cache/lib/bin.js", port: 3091, overlay: nil)
+        guard let index = args.firstIndex(of: "--port") else {
+            Issue.record("缺少 --port")
+            return
+        }
+        #expect(args[args.index(after: index)] == "3091")
+    }
+
+    @Test func suppressesTheAutoOpenedBrowser() {
+        // dsh 0.1.1-rc.2 起默认会自己打开系统浏览器。应用本身就是那个界面，
+        // 再弹一个浏览器窗口等于每次启动都多一个不请自来的标签页。
+        let args = ServerArguments.spawn(bootJS: "/cache/lib/bin.js", port: 3080, overlay: nil)
+        #expect(args.contains("--no-open"))
+    }
+
+    @Test func appliesTheOverlayAsTheLastLayer() {
+        // overlay 是组合链的最后一层：越靠后越优先，「停用插件」必须压过 profile 自己的配置
+        let args = ServerArguments.spawn(bootJS: "/cache/lib/bin.js", port: 3080,
+                                        overlay: "/support/Harness/safe-mode.yml")
+        guard let patch = args.firstIndex(of: "--patch") else {
+            Issue.record("缺少 --patch")
+            return
+        }
+        #expect(args[args.index(after: patch)] == "/support/Harness/safe-mode.yml")
+        #expect(patch > args.firstIndex(of: "--profile")!)
+    }
+
+    @Test func omitsPatchWhenNotInSafeMode() {
+        // 正常模式下不该出现空的 --patch：dsh 会把它当成缺参数直接报错
+        let args = ServerArguments.spawn(bootJS: "/cache/lib/bin.js", port: 3080, overlay: nil)
+        #expect(args.contains("--patch") == false)
+    }
+}

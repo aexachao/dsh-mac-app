@@ -226,11 +226,19 @@ final class ServerManager {
         }
     }
 
-    /// 确保 npx 缓存里已有 @deepseek-ai/dsh（静默安装，超时 180s）。
+    /// 确保 npx 缓存里已有 @deepseek-ai/dsh（静默安装）。
+    ///
+    /// 超时给到 20 分钟，不是保守，是量出来的：`@deepseek-ai/dsh@0.1.1-rc.2` 连同 web
+    /// profile 的依赖树解出来 283 MB，在 npm 缓存已经预热、网络通畅的机器上从开始解析到
+    /// 落盘用了约 14 分钟。原先的 180 s 只够走完依赖解析的开头，也就是说**首次安装必然超时**——
+    /// 对一台全新机器上的新用户，这是第一次启动就会撞上的失败。
     private func ensurePackage(node: URL) async -> Bool {
-        let timeout: TimeInterval = 180
+        let timeout: TimeInterval = 1200
         let npx = node.deletingLastPathComponent().appendingPathComponent("npx")
         log("[dsh-web] 检查 dsh 包缓存…")
+        // 首次安装是几百 MB 的依赖树，期间界面只显示「启动中」。提前说清量级，
+        // 免得用户以为卡死了去强杀进程——npx 装到一半被打断留下的缓存是坏的。
+        log("[dsh-web] 首次安装 dsh 需要下载数百 MB 依赖，通常几分钟到十几分钟，请勿退出。")
         let p = Process()
         p.executableURL = node
         p.arguments = [npx.path, "--yes", "@deepseek-ai/dsh", "--version"]
@@ -264,19 +272,11 @@ final class ServerManager {
 
     /// 以 node 直接运行 dsh 启动入口（单一直接子进程，便于退出清理）。
     ///
-    /// 用 `--profile web` 而不是 `dsh web` 子命令形式：后者是前者的别名，且拒收
-    /// `--patch` 等父级参数（`web takes none of parent --profile, --patch, …`），
-    /// 而端口与后续的安全模式 overlay 都要从父级参数传入。
+    /// 参数形式与其中的约束见 `ServerArguments`。
     private func spawnServer(node: URL, bootJS: URL, overlay: URL? = nil) {
         let p = Process()
         p.executableURL = node
-        // 端口显式传入：不再假设 dsh 的默认端口与本应用的假设一致。
-        var arguments = [bootJS.path, "--profile", "web", "--port", String(port)]
-        if let overlay {
-            // overlay 是组合链的最后一层，只做「停用」这一件事。
-            arguments += ["--patch", overlay.path]
-        }
-        p.arguments = arguments
+        p.arguments = ServerArguments.spawn(bootJS: bootJS.path, port: port, overlay: overlay?.path)
         p.currentDirectoryURL = homeDir
         p.environment = environment(node: node)
 

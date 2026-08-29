@@ -131,9 +131,11 @@ enum FailureCause: Equatable {
                 ? "npx 无法执行：\(message)。请确认 Node 安装完整（npx 与 node 在同一个 bin 目录下）。"
                 : "npx could not run: \(message). Check that your Node installation is complete (npx sits next to node)."
         case .npxTimeout(let seconds):
+            // 超时值已是分钟量级，按秒念（「超过 1200 秒」）读者得自己做除法
+            let minutes = max(1, seconds / 60)
             return zh
-                ? "通过 npx 安装 @deepseek-ai/dsh 超过 \(seconds) 秒未完成，通常是网络问题。可先在终端手动执行 npx --yes @deepseek-ai/dsh --version 再重试。"
-                : "Installing @deepseek-ai/dsh via npx exceeded \(seconds)s — usually a network issue. Try npx --yes @deepseek-ai/dsh --version in a terminal first, then retry."
+                ? "通过 npx 安装 @deepseek-ai/dsh 超过 \(minutes) 分钟未完成，通常是网络问题。可先在终端手动执行 npx --yes @deepseek-ai/dsh --version 看进度，装好后再重试。"
+                : "Installing @deepseek-ai/dsh via npx did not finish within \(minutes) min — usually a network issue. Run npx --yes @deepseek-ai/dsh --version in a terminal to watch its progress, then retry."
         case .bootJSMissing:
             return zh
                 ? "已安装 @deepseek-ai/dsh，但在 ~/.npm/_npx 缓存中找不到启动入口。删除该缓存目录后重试可重新下载。"
