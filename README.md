@@ -27,7 +27,7 @@
 - **安全模式** — 连续 3 次启动异常后自动停用第三方插件启动，横幅列出停用了什么并可一键退出；菜单也能手动进入。停用只走应用自己目录下的配置 overlay，不改动 `~/.dsh`
 - **沉浸式界面** — 隐藏标题栏、深色窗口背景，网页内容铺满窗口
 - **浏览器兜底** — `⌘⇧O` 在 Chrome 打开同一界面（WebView 流式渲染卡顿时）
-- **中文菜单栏** — 简体中文默认；设置中可切换 English，重启后应用与 dsh 界面语言同步
+- **中英文界面** — 简体中文默认；设置中可切换 English，菜单栏、状态提示、失败说明、安全模式横幅全部随之切换，重启后应用与 dsh 界面语言同步
 
 ## 构建
 
@@ -52,7 +52,8 @@ swift test
 - 单实例锁用 `flock` 而非 pid 文件（`~/Library/Application Support/Harness/instance.lock`）：锁随进程消失，崩溃后不会留下解不开的死锁；抢不到锁就激活已有实例并退出
 - 安全模式：静态扫描 `~/.dsh/profiles/web` 的 `package.json` + 各 bundle 的 `cordis.patch.yml` 得到插件清单（不需要 dsh 能启动），把「停用第三方插件」写成 `~/Library/Application Support/Harness/safe-mode.yml`，以 `--patch` 叠加
 - 日志脱敏后同时进内存缓冲区与 `~/Library/Logs/Harness/`（分段轮转、目录总量封顶、只清理自己写的文件）；「文件 → 导出诊断信息…」可一键导出环境与最近日志
-- 菜单栏中英文两套，语言偏好同步写入 dsh 的 `~/.dsh/settings.yaml`（`locale.preference`）
+- 菜单栏中英文两套，界面文案集中在 `Strings.swift`（穷尽 switch + 遍历全部 key 的不变量测试，漏一种语言编译不过、英文位抄成中文测试不过）；日志行故意保持单语，方便原样贴进 issue
+- 语言偏好同步写入 dsh 的 `~/.dsh/settings.yaml`（`locale.preference`）
 
 ## 目录结构
 
@@ -75,6 +76,7 @@ Sources/DSHWeb/
 ├── PluginInventory.swift    # 静态枚举 profile 装了哪些插件（不依赖 dsh 能启动）
 ├── SafeMode.swift           # 安全模式 overlay 渲染/写盘 + 开关持久化
 ├── MenuBuilder.swift        # 中英文菜单栏 + 语言偏好 + dsh 语言同步
+├── Strings.swift            # 界面文案表（中英双语，穷尽 switch 保证不漏）
 ├── ContentView.swift        # 主界面：三态内容区 + 日志面板
 ├── LogPanel.swift           # 独立日志窗口
 ├── SettingsView.swift       # 设置（语言切换）

@@ -6,6 +6,8 @@ struct ContentView: View {
     @State private var server = ServerManager.shared
     @State private var app = AppState.shared
 
+    private var language: AppLanguage { MenuBuilder.current }
+
     var body: some View {
         VStack(spacing: 0) {
             if server.isSafeMode {
@@ -78,7 +80,7 @@ struct ContentView: View {
             Button {
                 app.showLogs.toggle()
             } label: {
-                Label(app.showLogs ? "隐藏日志" : "日志", systemImage: "terminal")
+                Label(Strings.text(app.showLogs ? .hideLogs : .logs, language), systemImage: "terminal")
             }
         }
         .padding(.horizontal, 14)
@@ -102,10 +104,14 @@ struct ContentView: View {
 
     private var statusText: String {
         switch server.state {
-        case .starting: "正在启动服务…"
-        case .running: "服务运行中 · 127.0.0.1:\(server.port)"
-        case .external: "已在运行（外部实例）· 127.0.0.1:\(server.port)"
-        case .failed(let cause): "启动失败：\(cause.title(MenuBuilder.current))"
+        case .starting:
+            Strings.text(.statusStarting, language)
+        case .running:
+            Strings.text(.statusRunning, language, substituting: ["port": String(server.port)])
+        case .external:
+            Strings.text(.statusExternal, language, substituting: ["port": String(server.port)])
+        case .failed(let cause):
+            Strings.text(.statusFailed, language, substituting: ["reason": cause.title(language)])
         }
     }
 
@@ -120,10 +126,10 @@ struct ContentView: View {
             VStack(spacing: 14) {
                 ProgressView()
                     .controlSize(.large)
-                Text("正在启动 Harness 服务…")
+                Text(Strings.text(.startingTitle, language))
                     .font(.title3)
                     .foregroundStyle(.secondary)
-                Text("首次启动可能需要下载依赖，可通过菜单「Harness → 日志」查看进度。")
+                Text(Strings.text(.startingHint, language))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -174,7 +180,7 @@ struct SafeModeBanner: View {
             Text(title)
                 .font(.callout)
             if !disabled.isEmpty {
-                Button(language == .zh ? "查看清单" : "View List") {
+                Button(Strings.text(.safeModeViewList, language)) {
                     showingList = true
                 }
                 .buttonStyle(.link)
@@ -183,7 +189,7 @@ struct SafeModeBanner: View {
                 }
             }
             Spacer()
-            Button(language == .zh ? "退出安全模式" : "Exit Safe Mode", action: onExit)
+            Button(Strings.text(.safeModeExit, language), action: onExit)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -192,13 +198,10 @@ struct SafeModeBanner: View {
 
     private var title: String {
         if disabled.isEmpty {
-            return language == .zh
-                ? "安全模式：未发现可停用的第三方插件"
-                : "Safe mode: no third-party plugins found to disable"
+            return Strings.text(.safeModeNothingToDisable, language)
         }
-        return language == .zh
-            ? "安全模式：已临时停用 \(disabled.count) 个第三方插件"
-            : "Safe mode: \(disabled.count) third-party plugin(s) temporarily disabled"
+        return Strings.text(.safeModeDisabledCount, language,
+                            substituting: ["count": String(disabled.count)])
     }
 }
 
@@ -210,11 +213,9 @@ struct DisabledPluginList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(language == .zh ? "本次停用的插件" : "Disabled in this session")
+            Text(Strings.text(.disabledPluginsTitle, language))
                 .font(.headline)
-            Text(language == .zh
-                 ? "退出安全模式后它们会重新启用。"
-                 : "They are re-enabled when you exit safe mode.")
+            Text(Strings.text(.disabledPluginsHint, language))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Divider()
@@ -299,10 +300,12 @@ struct LogView: View {
     let lines: [String]
     var onClose: () -> Void
 
+    private var language: AppLanguage { MenuBuilder.current }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Label("日志", systemImage: "terminal")
+                Label(Strings.text(.logs, language), systemImage: "terminal")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -311,7 +314,7 @@ struct LogView: View {
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
-                .help("收起日志 (⌘⇧L)")
+                .help(Strings.text(.collapseLogsHelp, language))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)

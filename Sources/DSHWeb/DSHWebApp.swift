@@ -61,22 +61,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 用户的动作是「打开 Harness」，得到的应该是一个 Harness 窗口——静悄悄地退出
     /// 会被当成「应用点了没反应」。找不到可激活的实例时（比如持锁者是 `swift run`
     /// 起的无 bundle 进程）才退回到弹窗说明，否则就真成了点了没反应。
+    ///
+    /// 显式标 `@MainActor`：`applicationDidFinishLaunching` 因为是协议要求而自带隔离，
+    /// 私有方法不会继承它，`NSAlert` 又必须在主线程上用。
+    @MainActor
     private func activateExistingInstance(pid: pid_t?) {
         if let running = runningSibling(pid: pid) {
             running.activate()
             return
         }
-        let zh = MenuBuilder.current == .zh
+        let language = MenuBuilder.current
+        let holder = pid.map {
+            Strings.text(.instanceRunningHolder, language, substituting: ["pid": String($0)])
+        } ?? ""
         let alert = NSAlert()
-        alert.messageText = zh ? "Harness 已在运行" : "Harness is already running"
-        let holder = pid.map { zh ? "（进程 \($0)）" : " (process \($0))" } ?? ""
-        alert.informativeText = zh
-            ? "已有一个 Harness 实例\(holder)持有单实例锁，但无法切换到它的窗口。"
-                + "请先退出那个实例，再重新打开。"
-            : "Another Harness instance\(holder) holds the single-instance lock, "
-                + "but its window could not be brought forward. Quit that instance first, then reopen."
+        alert.messageText = Strings.text(.instanceRunningTitle, language)
+        alert.informativeText = Strings.text(.instanceRunningDetail, language,
+                                            substituting: ["holder": holder])
         alert.alertStyle = .warning
-        alert.addButton(withTitle: zh ? "好" : "OK")
+        alert.addButton(withTitle: Strings.text(.ok, language))
         alert.runModal()
     }
 

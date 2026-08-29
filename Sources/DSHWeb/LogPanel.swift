@@ -13,7 +13,8 @@ final class LogPanel: NSWindow {
             backing: .buffered,
             defer: false
         )
-        title = "日志"
+        // 语言切换要求重启应用，所以这里在 init 时定一次就够
+        title = Strings.text(.logs, MenuBuilder.current)
         contentView = NSHostingView(rootView: LogListView())
         isReleasedWhenClosed = false
     }

@@ -19,23 +19,27 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Picker("界面语言", selection: language) {
+            Picker(Strings.text(.settingsLanguage, MenuBuilder.current), selection: language) {
+                // 语言名各自用自己的语言写，不随界面语言变化（惯例：菜单里永远能认出母语那一项）
                 Text("简体中文").tag(AppLanguage.zh)
                 Text("English").tag(AppLanguage.en)
             }
             .pickerStyle(.menu) // 下拉选择样式
 
-            Text("当前生效：\(effectiveLabel)（切换后需重启应用生效）")
+            Text(Strings.text(.settingsEffective, MenuBuilder.current,
+                              substituting: ["language": effectiveLabel]))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(20)
         .frame(width: 340)
-        .alert("重启应用以生效？", isPresented: $showRestartAlert) {
-            Button("取消", role: .cancel) { languageRaw = previousLanguage.rawValue }
-            Button("立即重启") { persistAndRestart() }
+        .alert(Strings.text(.restartAlertTitle, MenuBuilder.current), isPresented: $showRestartAlert) {
+            Button(Strings.text(.cancel, MenuBuilder.current), role: .cancel) {
+                languageRaw = previousLanguage.rawValue
+            }
+            Button(Strings.text(.restartNow, MenuBuilder.current)) { persistAndRestart() }
         } message: {
-            Text("界面语言将在重启后生效。应用会先停止服务再自动重新启动。")
+            Text(Strings.text(.restartAlertMessage, MenuBuilder.current))
         }
     }
 

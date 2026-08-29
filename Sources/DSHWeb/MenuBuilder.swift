@@ -63,7 +63,7 @@ enum MenuBuilder {
             let subs = item.submenu?.items.compactMap { $0.title.isEmpty ? nil : $0.title }.joined(separator: "|") ?? ""
             return "\(item.title): \(subs)"
         }.joined(separator: "\n") ?? "nil"
-        let text = "=== \(tag) ===\n\(lines ?? "nil")\n"
+        let text = "=== \(tag) ===\n\(lines)\n"
         if let data = text.data(using: .utf8) {
             if let fh = FileHandle(forWritingAtPath: "/tmp/menu-state.log") {
                 fh.seekToEndOfFile()
@@ -322,7 +322,7 @@ final class SettingsPanel: NSPanel {
             backing: .buffered,
             defer: false
         )
-        title = "设置"
+        title = Strings.text(.settingsTitle, MenuBuilder.current)
         contentView = NSHostingView(rootView: SettingsView())
         isReleasedWhenClosed = false
     }
