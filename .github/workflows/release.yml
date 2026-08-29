@@ -13,59 +13,158 @@ on:
 permissions:
   contents: write
 
+# 按架构分开出包，不再出 universal。原因在 vendor-runtime.sh 里：dsh 依赖树带
+# 平台专属的原生模块（@img/sharp-darwin-*、@koromix/koffi-darwin-*、node-pty 预构建），
+# 一个 node_modules 只能属于一个架构，universal 包装不进两份互斥的树。
 jobs:
-  build-release:
-    name: Build universal Harness.app and publish release
+  prepare:
+    name: Test and resolve version
     runs-on: macos-15
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve version from tag
         id: version
         run: |
           TAG="${{ inputs.tag || '' }}"
           if [ -z "$TAG" ]; then TAG="${GITHUB_REF#refs/tags/}"; fi
-          VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Run unit tests
         run: swift test
 
-      - name: Build universal app
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          BUILD: ${{ github.run_number }}
-          NO_INSTALL: '1'
-        run: |
-          ./scripts/build.sh
-          cd dist
-          ditto -c -k --keepParent "Harness.app" "Harness-${{ steps.version.outputs.version }}-macos-universal.zip"
-          shasum -a 256 "Harness-${{ steps.version.outputs.version }}-macos-universal.zip" > SHA256SUMS.txt
-
       - name: Extract changelog entry for this version
-        id: changelog
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           # 取 CHANGELOG.md 中该版本条目（到下一个 ## 为止）；缺失时仅提交列表
-          awk -v v="## [$VERSION]" 'index($0, v)==1 {f=1; next} f && /^## / {f=0} f {print}' CHANGELOG.md > /tmp/notes-body.md
-          if [ -s /tmp/notes-body.md ]; then echo "" >> /tmp/notes-body.md; fi
-          echo "### Commits" >> /tmp/notes-body.md
+          awk -v v="## [$VERSION]" 'index($0, v)==1 {f=1; next} f && /^## / {f=0} f {print}' CHANGELOG.md > notes-body.md
+          if [ -s notes-body.md ]; then echo "" >> notes-body.md; fi
+          echo "### Commits" >> notes-body.md
           PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
           if [ -n "$PREV" ]; then
-            git log --oneline --no-merges "$PREV..HEAD" | sed 's/^/- /' >> /tmp/notes-body.md
+            git log --oneline --no-merges "$PREV..HEAD" | sed 's/^/- /' >> notes-body.md
           else
-            git log --oneline --no-merges | sed 's/^/- /' >> /tmp/notes-body.md
+            git log --oneline --no-merges | sed 's/^/- /' >> notes-body.md
           fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: notes-body.md
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: prepare
+    # 捆绑运行时要装一遍 dsh 的完整依赖树（~250 MB），加上公证等待，给足时间。
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            label: apple-silicon
+          - arch: x86_64
+            runner: macos-15-intel
+            label: intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 证书缺失时不失败，退回 ad-hoc 签名：那是本仓库在配置签名之前的既有行为，
+      # 不该因为引入签名流程就让发布断掉。代价写进 release notes，见 publish。
+      - name: Import signing certificate
+        id: signing
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          if [ -z "${MACOS_CERT_P12:-}" ]; then
+            echo "::warning::没有配置 MACOS_CERT_P12，本次发布退回 ad-hoc 签名，用户需要右键打开且无法公证"
+            echo "identity=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          IDENTITY="$(./scripts/import-signing-cert.sh)"
+          # 不 mask：这串名字连团队 ID 都印在每个已签名的分发包里，本来就是公开信息，
+          # 遮起来只会让 codesign 那行日志变成 ***，出问题时看不出用的是哪张证书。
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+
+      - name: Build and notarize
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD: ${{ github.run_number }}
+          ARCHS: ${{ matrix.arch }}
+          BUNDLE_RUNTIME: '1'
+          NO_INSTALL: '1'
+          CODESIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+        run: |
+          # 公证要三样都在：Developer ID 身份 + API 密钥。缺任何一样就只签名不公证。
+          if [ -n "${CODESIGN_IDENTITY:-}" ] && [ -n "${AC_API_KEY_ID:-}" ] && [ -n "${AC_API_KEY_P8:-}" ]; then
+            export NOTARIZE=1
+          else
+            echo "::warning::跳过公证（缺 Developer ID 身份或 App Store Connect 密钥）"
+          fi
+          ./scripts/build.sh
+
+      # 打包必须在公证与装订之后：票据装订到 .app 自身，先打的包里没有它。
+      - name: Package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          NAME="Harness-${VERSION}-macos-${{ matrix.label }}"
+          cd dist
+          ditto -c -k --keepParent "Harness.app" "${NAME}.zip"
+          shasum -a 256 "${NAME}.zip" > "${NAME}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harness-${{ matrix.label }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+  publish:
+    name: Publish release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble assets and notes
+        run: |
+          mkdir -p out
+          find artifacts -name '*.zip' -exec mv {} out/ \;
+          find artifacts -name '*.sha256' -exec cat {} + > out/SHA256SUMS.txt
+          cp artifacts/release-notes/notes-body.md notes.md
+          # 架构不是随便分的，用户下错了包连不上 —— 说明写在最前面
+          {
+            echo "下载对应你 Mac 的包：Apple Silicon（M 系列）选 apple-silicon，Intel 选 intel。"
+            echo "dsh 运行时已捆绑在应用内，不需要预先安装 Node.js。"
+            echo ""
+            cat notes.md
+          } > out/notes.md
+          ls -la out
 
       - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
+          # publish 这一步没有 checkout（只需要 artifacts），gh 找不到 git remote，
+          # 必须显式告诉它是哪个仓库。
+          GH_REPO: ${{ github.repository }}
         run: |
-          cd dist
-          gh release create "${{ steps.version.outputs.tag }}" \
-            "Harness-${{ steps.version.outputs.version }}-macos-universal.zip" \
-            SHA256SUMS.txt \
-            --title "Harness ${{ steps.version.outputs.version }}" \
-            --notes-file /tmp/notes-body.md
+          cd out
+          gh release create "${{ needs.prepare.outputs.tag }}" \
+            *.zip SHA256SUMS.txt \
+            --title "Harness ${{ needs.prepare.outputs.version }}" \
+            --notes-file notes.md
