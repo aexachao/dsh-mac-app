@@ -6,7 +6,7 @@ enum ServerState: Equatable {
     case starting          // 已启动进程，等待就绪
     case running(port: Int) // 就绪，WebView 可加载
     case external(port: Int) // 启动前端口已被占用（外部实例），直接连接
-    case failed(String)     // 启动失败或运行中退出
+    case failed(FailureCause) // 启动失败或运行中退出（带分类与可操作的下一步）
 }
 
 /// 管理 dsh 服务进程的生命周期、日志捕获与状态机。
@@ -185,11 +185,11 @@ final class ServerManager {
     private func launchServer() {
         state = .starting
         guard let node = resolveNode() else {
-            fail("找不到 Node.js。请先安装 Node（如 brew install node 或 nvm）。")
+            fail(.nodeMissing)
             return
         }
         guard let chosen = PortStrategy.firstAvailable(from: PortStrategy.defaultPort, isAvailable: LocalPort.isFree) else {
-            fail("从 \(PortStrategy.defaultPort) 起连续 \(PortStrategy.scanLimit) 个端口都被占用，请释放端口后重试。")
+            fail(.portExhausted(from: PortStrategy.defaultPort, scanned: PortStrategy.scanLimit))
             return
         }
         if chosen != PortStrategy.defaultPort {
@@ -207,7 +207,7 @@ final class ServerManager {
             let ok = await self.ensurePackage(node: node)
             guard ok else { return } // fail 已由 ensurePackage 处理
             guard let boot = self.resolveBootJS() else {
-                self.fail("已安装 @deepseek-ai/dsh 但找不到启动入口，请检查 ~/.npm/_npx 缓存。")
+                self.fail(.bootJSMissing)
                 return
             }
             self.spawnServer(node: node, bootJS: boot)
@@ -216,6 +216,7 @@ final class ServerManager {
 
     /// 确保 npx 缓存里已有 @deepseek-ai/dsh（静默安装，超时 180s）。
     private func ensurePackage(node: URL) async -> Bool {
+        let timeout: TimeInterval = 180
         let npx = node.deletingLastPathComponent().appendingPathComponent("npx")
         log("[dsh-web] 检查 dsh 包缓存…")
         let p = Process()
@@ -233,15 +234,15 @@ final class ServerManager {
             try p.run()
         } catch {
             log("[dsh-web] 启动 npx 失败: \(error.localizedDescription)")
-            fail("无法运行 npx: \(error.localizedDescription)")
+            fail(.npxUnavailable(error.localizedDescription))
             return false
         }
-        let deadline = Date().addingTimeInterval(180)
+        let deadline = Date().addingTimeInterval(timeout)
         while p.isRunning {
             if Date() > deadline {
                 p.terminate()
-                log("[dsh-web] 安装 @deepseek-ai/dsh 超时（180s），已终止。")
-                fail("安装 @deepseek-ai/dsh 超时，请检查网络后重试。")
+                log("[dsh-web] 安装 @deepseek-ai/dsh 超时（\(Int(timeout))s），已终止。")
+                fail(.npxTimeout(seconds: Int(timeout)))
                 return false
             }
             try? await Task.sleep(for: .milliseconds(200))
@@ -273,7 +274,12 @@ final class ServerManager {
                 self.observation?.exitedAt = Date()
                 self.observation?.exitStatus = p.terminationStatus
                 self.settleHealth()
-                self.fail("服务意外退出（exit \(p.terminationStatus)），详见日志。")
+                // 从日志尾部推断真正的原因：dsh 拒绝启动时会把理由写在退出前的最后几行，
+                // 只报 exit code 等于把唯一有用的线索丢掉。
+                self.fail(FailureCause.classify(
+                    exitStatus: p.terminationStatus,
+                    logTail: Array(self.logLines.suffix(Self.classificationTailLines))
+                ))
             }
         }
 
@@ -282,7 +288,7 @@ final class ServerManager {
         do {
             try p.run()
         } catch {
-            fail("无法启动服务: \(error.localizedDescription)")
+            fail(.spawnFailed(error.localizedDescription))
             return
         }
         process = p
@@ -293,7 +299,7 @@ final class ServerManager {
         // 那要 20-30s；页面由 dsh 前端自己的 loading 处理）。最多等 90s。
         Task { [weak self] in
             guard let self else { return }
-            let deadline = Date().addingTimeInterval(90)
+            let deadline = Date().addingTimeInterval(Self.readinessTimeout)
             while self.process === p, case .starting = self.state {
                 if await self.probePort(self.port) {
                     self.state = .running(port: self.port)
@@ -301,13 +307,20 @@ final class ServerManager {
                     return
                 }
                 if Date() > deadline {
-                    self.fail("服务启动 90s 未就绪，详见日志。")
+                    self.fail(.readinessTimeout(seconds: Int(Self.readinessTimeout)))
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(300))
             }
         }
     }
+
+    /// 就绪等待上限。dsh 冷启动最慢的一次约 30s，90s 留了三倍余量。
+    private static let readinessTimeout: TimeInterval = 90
+
+    /// 分类时回看的日志行数。dsh 退出前的报错通常紧邻末尾，回看太多会把上一次
+    /// 启动的报错也算进来。
+    private static let classificationTailLines = 40
 
     // MARK: - 启动健康判定
 
@@ -413,12 +426,12 @@ final class ServerManager {
 
     /// 进入失败态并保证日志可见（UI 会随 state 自动展开日志面板）。
     ///
-    /// 失败文案会显示在界面上、并随截图一起流出，所以同样先脱敏：
-    /// `error.localizedDescription` 可能带上完整命令行或 URL。
-    private func fail(_ message: String) {
-        let safe = SecretMasker.mask(message)
-        log("[dsh-web] ❌ \(safe)")
-        state = .failed(safe)
+    /// 失败原因带分类：界面据此给出「怎么办」的按钮，而不是只把一句英文报错糊在屏幕上。
+    /// 文案的脱敏由 `FailureCause.detail` 负责（它是唯一的出口），这里再过一遍 `log`
+    /// 的脱敏也无害——规则是幂等的。
+    private func fail(_ cause: FailureCause) {
+        log("[dsh-web] ❌ \(cause.title(.zh))：\(cause.detail(.zh))")
+        state = .failed(cause)
     }
 
     /// 后台持续读取管道数据，按行切分后跳回主线程交给 `ingest`。
@@ -484,7 +497,7 @@ final class ServerManager {
         case .starting: return "starting"
         case .running(let port): return "running(port: \(port))"
         case .external(let port): return "external(port: \(port))"
-        case .failed(let message): return "failed(\(message))"
+        case .failed(let cause): return "failed(\(cause.identifier))"
         }
     }
 

@@ -63,6 +63,7 @@ Sources/DSHWeb/
 ├── LogFileSink.swift        # 日志落盘与轮转（~/Library/Logs/Harness）
 ├── DiagnosticsReport.swift  # 诊断报告渲染（导出前整份脱敏）
 ├── StartupHealth.swift      # 启动是否真的成功（纯判定）+ 连续失败计数持久化
+├── FailureCause.swift       # 失败原因分类与恢复动作（纯值类型）
 ├── MenuBuilder.swift        # 中英文菜单栏 + 语言偏好 + dsh 语言同步
 ├── ContentView.swift        # 主界面：三态内容区 + 日志面板
 ├── LogPanel.swift           # 独立日志窗口

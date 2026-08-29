@@ -98,7 +98,7 @@ struct ContentView: View {
         case .starting: "正在启动服务…"
         case .running: "服务运行中 · 127.0.0.1:\(server.port)"
         case .external: "已在运行（外部实例）· 127.0.0.1:\(server.port)"
-        case .failed(let message): "启动失败：\(message)"
+        case .failed(let cause): "启动失败：\(cause.title(MenuBuilder.current))"
         }
     }
 
@@ -121,28 +121,88 @@ struct ContentView: View {
                     .foregroundStyle(.tertiary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        case .failed(let message):
-            VStack(spacing: 16) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 44))
-                    .foregroundStyle(.red)
-                Text("服务启动失败")
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                Text(message)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 40)
-                HStack(spacing: 12) {
-                    Button("查看日志") { app.showLogs = true }
-                        .buttonStyle(.bordered)
-                    Button("重试") { server.restart() }
-                        .buttonStyle(.borderedProminent)
+        case .failed(let cause):
+            FailureView(cause: cause) { action in
+                perform(action)
+            }
+        }
+    }
+
+    /// 执行失败态上的恢复动作。
+    ///
+    /// 动作是数据（`RecoveryAction`），执行留在视图层：`FailureCause` 因此保持纯粹，
+    /// 分类规则可以在单测里跑而不需要 AppKit。
+    private func perform(_ action: FailureCause.RecoveryAction) {
+        switch action {
+        case .retry:
+            server.restart()
+        case .viewLogs:
+            app.showLogs = true
+        case .exportDiagnostics:
+            MenuActions.shared.exportDiagnostics()
+        case .open(let url):
+            NSWorkspace.shared.open(url)
+        case .reveal(let path):
+            NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: (path as NSString).deletingLastPathComponent)
+        }
+    }
+}
+
+/// 失败态内容区：一句「是什么」、一段「为什么」、一排「怎么办」。
+///
+/// 单独成型而不是塞在 `ContentView` 的 switch 里：失败态是这个应用里信息最密的一屏，
+/// 混在三态分支里会让每个分支都难读。
+struct FailureView: View {
+    let cause: FailureCause
+    var onAction: (FailureCause.RecoveryAction) -> Void
+
+    private var language: AppLanguage { MenuBuilder.current }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 44))
+                .foregroundStyle(.red)
+            Text(cause.title(language))
+                .font(.title2)
+                .fontWeight(.semibold)
+            Text(cause.detail(language))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+                .frame(maxWidth: 520)
+                .padding(.horizontal, 40)
+            HStack(spacing: 12) {
+                ForEach(Array(cause.actions.enumerated()), id: \.offset) { _, action in
+                    Button {
+                        onAction(action)
+                    } label: {
+                        Label(action.label(language), systemImage: action.symbol)
+                    }
+                    .buttonStyle(action.isPrimary ? AnyButtonStyle(.borderedProminent) : AnyButtonStyle(.bordered))
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// 按钮样式的类型擦除。
+///
+/// SwiftUI 的 `buttonStyle` 泛型参数无法在三元表达式里混用两种具体样式，
+/// 而失败态的按钮要按 `isPrimary` 逐个决定强调程度。
+struct AnyButtonStyle: PrimitiveButtonStyle {
+    private let make: (Configuration) -> AnyView
+
+    init<S: PrimitiveButtonStyle>(_ style: S) {
+        make = { configuration in
+            AnyView(Button(configuration).buttonStyle(style))
+        }
+    }
+
+    func makeBody(configuration: Configuration) -> some View {
+        make(configuration)
     }
 }
 
