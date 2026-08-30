@@ -18,7 +18,8 @@ set -euo pipefail
 KEYCHAIN="${RUNNER_TEMP:-/tmp}/harness-signing.keychain-db"
 KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 24)}"
 P12="$(umask 077 && mktemp -t harness-cert)"
-CLEANUP=("$P12")
+IMPORT_ERR="$(umask 077 && mktemp -t harness-cert-err)"
+CLEANUP=("$P12" "$IMPORT_ERR")
 cleanup() { for f in "${CLEANUP[@]}"; do rm -f "$f"; done; }
 trap cleanup EXIT
 
@@ -29,10 +30,14 @@ security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security set-keychain-settings -lut 21600 "$KEYCHAIN"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 
-if ! security import "$P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
-  -T /usr/bin/codesign -T /usr/bin/security >/dev/null 2>&1; then
+# -f pkcs12 不能省：security import 是按**文件扩展名**猜格式的，而上面的 mktemp 产出的
+# 临时文件没有 .p12 后缀，不显式指定格式就一律是 `Unknown format in import`——
+# 跟 .p12 的内容、加密算法、密码都无关，纯粹是猜不出来。
+if ! security import "$P12" -f pkcs12 -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
+  -T /usr/bin/codesign -T /usr/bin/security >/dev/null 2>"$IMPORT_ERR"; then
   # 部分 macOS runner 的 security 无法读取新版 PKCS#12，先用 OpenSSL
   # 重新封装成兼容格式；密码错误也会在这里给出明确诊断。
+  echo "-- 直接导入失败，改走 OpenSSL 重封装：$(tr -d '\n' <"$IMPORT_ERR")" >&2
   PEM="$(umask 077 && mktemp -t harness-cert-pem)"
   COMPAT_P12="$(umask 077 && mktemp -t harness-cert-compat)"
   CLEANUP+=("$PEM" "$COMPAT_P12")
@@ -45,7 +50,7 @@ if ! security import "$P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
   # shellcheck disable=SC2086
   openssl pkcs12 $LEGACY_FLAG -export -in "$PEM" -out "$COMPAT_P12" \
     -passout env:MACOS_CERT_PASSWORD
-  security import "$COMPAT_P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
+  security import "$COMPAT_P12" -f pkcs12 -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
     -T /usr/bin/codesign -T /usr/bin/security >/dev/null
 fi
 
