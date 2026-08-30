@@ -90,7 +90,10 @@ jobs:
             echo "identity=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          IDENTITY="$(./scripts/import-signing-cert.sh)"
+          if ! IDENTITY="$(./scripts/import-signing-cert.sh)" || [ -z "$IDENTITY" ]; then
+            echo "::error::Developer ID 证书导入失败"
+            exit 1
+          fi
           # 不 mask：这串名字连团队 ID 都印在每个已签名的分发包里，本来就是公开信息，
           # 遮起来只会让 codesign 那行日志变成 ***，出问题时看不出用的是哪张证书。
           echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"

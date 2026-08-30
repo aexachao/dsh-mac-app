@@ -2,6 +2,12 @@
 
 本文件记录 Harness 的版本变更。Release 构建时由 GitHub Actions 读取（`v*` tag 对应的条目），并附加 git 提交生成 release notes。
 
+## [0.3.3] - 2026-08-30
+
+### 修复
+- CI 的 PKCS#12 兼容回退改用 Bash 3.2 安全的参数写法，并在证书导入失败时立即中止，避免静默退回 ad-hoc 签名
+- npm 安装内置 DSH 运行时的 Node.js 堆上限提高到 4 GB，避免 arm64 runner 在约 2 GB 默认上限处内存溢出
+
 ## [0.3.2] - 2026-08-30
 
 ### 修复

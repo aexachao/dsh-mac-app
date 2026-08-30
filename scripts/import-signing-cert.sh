@@ -36,11 +36,14 @@ if ! security import "$P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
   PEM="$(umask 077 && mktemp -t harness-cert-pem)"
   COMPAT_P12="$(umask 077 && mktemp -t harness-cert-compat)"
   CLEANUP+=("$PEM" "$COMPAT_P12")
-  LEGACY=()
-  if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then LEGACY=(-legacy); fi
-  openssl pkcs12 "${LEGACY[@]}" -in "$P12" \
+  LEGACY_FLAG=""
+  if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then LEGACY_FLAG="-legacy"; fi
+  # Bash 3.2 + set -u 会把空数组展开视为未绑定；这里最多只有一个固定参数，用标量兼容旧 runner。
+  # shellcheck disable=SC2086
+  openssl pkcs12 $LEGACY_FLAG -in "$P12" \
     -passin env:MACOS_CERT_PASSWORD -nodes -out "$PEM"
-  openssl pkcs12 "${LEGACY[@]}" -export -in "$PEM" -out "$COMPAT_P12" \
+  # shellcheck disable=SC2086
+  openssl pkcs12 $LEGACY_FLAG -export -in "$PEM" -out "$COMPAT_P12" \
     -passout env:MACOS_CERT_PASSWORD
   security import "$COMPAT_P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
     -T /usr/bin/codesign -T /usr/bin/security >/dev/null

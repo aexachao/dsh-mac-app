@@ -81,7 +81,7 @@ if [ ! -f "$DSH_CACHE/$DSH_ENTRY" ]; then
   mkdir -p "$DSH_CACHE"
   # 用刚下下来的 pin 版 node 装，让原生模块的 N-API ABI 与我们捆绑的 node 是同一个
   ( cd "$DSH_CACHE" \
-    && PATH="$ROOT/$NODE_CACHE/bin:$PATH" npm install \
+    && NODE_OPTIONS="--max-old-space-size=4096" PATH="$ROOT/$NODE_CACHE/bin:$PATH" npm install \
          --omit=dev --no-audit --no-fund --loglevel=error \
          "@deepseek-ai/dsh@$DSH_VERSION" )
 
