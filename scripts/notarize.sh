@@ -23,7 +23,7 @@ APP="${1:-dist/Harness.app}"
 cd "$(dirname "$0")/.."
 
 if [ ! -d "$APP" ]; then
-  echo "!! 找不到 $APP，先跑 ./scripts/build.sh" >&2
+  echo "!! 找不到 ${APP}，先跑 ./scripts/build.sh" >&2
   exit 1
 fi
 
@@ -71,7 +71,10 @@ fi
 # 而 CI 里拿到的是 base64 字符串。
 CREDS=()
 CLEANUP=()
-cleanup() { for f in ${CLEANUP[@]+"${CLEANUP[@]}"}; do rm -f "$f"; done; }
+# rm -rf 而不是 -f：待公证的 zip 落在一个 mktemp -d 出来的目录里，只删文件会把空目录
+# 留在 $TMPDIR 下攒着。数组用 ${a[@]+"${a[@]}"} 展开——bash 3.2 + set -u 把空数组的
+# "${a[@]}" 当未绑定变量。
+cleanup() { for f in ${CLEANUP[@]+"${CLEANUP[@]}"}; do rm -rf "$f"; done; }
 trap cleanup EXIT
 
 if [ -n "${AC_API_KEY_ID:-}" ] && [ -n "${AC_API_ISSUER_ID:-}" ]; then
@@ -99,8 +102,9 @@ fi
 # ---------- 提交 ----------
 # notarytool 只吃 zip/dmg/pkg，所以先打一个"提交用"的包。它与最终分发的包不是同一个：
 # 票据是装订到 .app 上的，装订完必须重新打包（见下），否则用户下到的还是没票据的那份。
-SUBMIT_ZIP="$(mktemp -d -t harness-notarize)/$(basename "$APP" .app).zip"
-CLEANUP+=("$SUBMIT_ZIP")
+SUBMIT_DIR="$(mktemp -d -t harness-notarize)"
+CLEANUP+=("$SUBMIT_DIR")
+SUBMIT_ZIP="$SUBMIT_DIR/$(basename "$APP" .app).zip"
 echo "==> 打包待公证：$SUBMIT_ZIP"
 ditto -c -k --keepParent "$APP" "$SUBMIT_ZIP"
 
@@ -117,7 +121,10 @@ echo "$SUBMIT_LOG"
 if [ $SUBMIT_STATUS -ne 0 ] || ! grep -q "status: Accepted" <<<"$SUBMIT_LOG"; then
   REQUEST_ID="$(sed -n 's/^ *id: \([0-9a-f-]*\)$/\1/p' <<<"$SUBMIT_LOG" | head -1)"
   if [ -n "$REQUEST_ID" ]; then
-    echo "==> 公证未通过，拉取详细日志（$REQUEST_ID）" >&2
+    # ${} 不能省：bash 3.2 会把紧跟的全角括号并进变量名，set -u 下整个脚本在这一行
+    # 就以 `REQUEST_ID）: unbound variable` 中止，下面那条日志再也拉不到——
+    # 偏偏这是最需要它的时候。
+    echo "==> 公证未通过，拉取详细日志（${REQUEST_ID}）" >&2
     xcrun notarytool log "$REQUEST_ID" "${CREDS[@]}" >&2 || true
   fi
   exit 1

@@ -44,7 +44,14 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           # 取 CHANGELOG.md 中该版本条目（到下一个 ## 为止）；缺失时仅提交列表
           awk -v v="## [$VERSION]" 'index($0, v)==1 {f=1; next} f && /^## / {f=0} f {print}' CHANGELOG.md > notes-body.md
-          if [ -s notes-body.md ]; then echo "" >> notes-body.md; fi
+          if [ -s notes-body.md ]; then
+            echo "" >> notes-body.md
+          else
+            # 版本号由 auto-release.yml 自动 +1 得出，而 CHANGELOG 条目是手写的：
+            # 手写成 0.4.0 而自动 tag 是 0.3.5 时，两边对不上，本次发布就只剩提交列表。
+            # 静悄悄地发一版空白说明比发布失败更难察觉，所以这里必须出声。
+            echo "::warning::CHANGELOG.md 里没有 ## [$VERSION] 条目，release notes 将只包含提交列表"
+          fi
           echo "### Commits" >> notes-body.md
           PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
           if [ -n "$PREV" ]; then
@@ -111,12 +118,19 @@ jobs:
           AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
         run: |
           # 公证要三样都在：Developer ID 身份 + API 密钥。缺任何一样就只签名不公证。
-          if [ -n "${CODESIGN_IDENTITY:-}" ] && [ -n "${AC_API_KEY_ID:-}" ] && [ -n "${AC_API_ISSUER_ID:-}" ] && [ -n "${AC_API_KEY_P8:-}" ]; then
+          SIGNING=adhoc
+          if [ -n "${CODESIGN_IDENTITY:-}" ]; then SIGNING=signed; fi
+          if [ "$SIGNING" = "signed" ] && [ -n "${AC_API_KEY_ID:-}" ] && [ -n "${AC_API_ISSUER_ID:-}" ] && [ -n "${AC_API_KEY_P8:-}" ]; then
             export NOTARIZE=1
+            SIGNING=notarized
           else
             echo "::warning::跳过公证（缺 Developer ID 身份或 App Store Connect 密钥）"
           fi
           ./scripts/build.sh
+          # 签名档次随包一起走到 publish：降级发布是允许的，但用户必须在 release notes 里
+          # 看到「首次打开要右键」，否则他们只会看到一个打不开的应用。
+          # 写在 build.sh 之后——构建失败就不该留下这个标记。
+          echo "$SIGNING" > "dist/signing-${{ matrix.label }}.txt"
 
       # 打包必须在公证与装订之后：票据装订到 .app 自身，先打的包里没有它。
       - name: Package
@@ -134,6 +148,7 @@ jobs:
           path: |
             dist/*.zip
             dist/*.sha256
+            dist/signing-*.txt
 
   publish:
     name: Publish release
@@ -150,10 +165,22 @@ jobs:
           find artifacts -name '*.zip' -exec mv {} out/ \;
           find artifacts -name '*.sha256' -exec cat {} + > out/SHA256SUMS.txt
           cp artifacts/release-notes/notes-body.md notes.md
+
+          # 签名降级必须写进 release notes。ad-hoc 包在用户机器上是「已损坏，
+          # 无法打开」——不解释一句，收到的就是「你们发的版本是坏的」。
+          # 任一架构降级就整体提示：两个包同源，用户也只会读一份说明。
+          SIGNING_WARN=""
+          if grep -rqx 'adhoc' artifacts/*/signing-*.txt 2>/dev/null; then
+            SIGNING_WARN="⚠️ 本次构建**未使用 Developer ID 签名**（ad-hoc）：首次打开请右键点击应用 →「打开」，或到「系统设置 → 隐私与安全性」里点「仍要打开」。"
+          elif grep -rqx 'signed' artifacts/*/signing-*.txt 2>/dev/null; then
+            SIGNING_WARN="⚠️ 本次构建已用 Developer ID 签名但**未经 Apple 公证**：首次打开可能需要到「系统设置 → 隐私与安全性」里点「仍要打开」。"
+          fi
+
           # 架构不是随便分的，用户下错了包连不上 —— 说明写在最前面
           {
             echo "下载对应你 Mac 的包：Apple Silicon（M 系列）选 apple-silicon，Intel 选 intel。"
             echo "dsh 运行时已捆绑在应用内，不需要预先安装 Node.js。"
+            if [ -n "$SIGNING_WARN" ]; then echo ""; echo "$SIGNING_WARN"; fi
             echo ""
             cat notes.md
           } > out/notes.md

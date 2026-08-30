@@ -43,6 +43,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.check.outputs.branch }}
+          # SUMMARY 也走 env，理由同上面的 diff：它的内容来自 npm 与 nodejs.org，
+          # 直接 ${{ }} 展开就是把第三方字符串拼进 shell 脚本文本里。
+          SUMMARY: ${{ steps.check.outputs.summary }}
         run: |
           if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
             echo "$BRANCH 已存在，跳过"
@@ -51,7 +54,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
-          git commit -q -am "chore: 运行时锁跟随上游（${{ steps.check.outputs.summary }}）"
+          git commit -q -am "chore: 运行时锁跟随上游（${SUMMARY}）"
           git push -q -u origin "$BRANCH"
           {
             echo '自动跟随上游版本。**合并前必须人工验证**——锁文件一变就等于换运行时。'
@@ -69,5 +72,5 @@ jobs:
             echo '- [ ] `CHANGELOG.md` 里记一句运行时版本变化'
           } > /tmp/pr-body.md
           gh pr create --base main --head "$BRANCH" \
-            --title "chore: 运行时锁跟随上游（${{ steps.check.outputs.summary }}）" \
+            --title "chore: 运行时锁跟随上游（${SUMMARY}）" \
             --body-file /tmp/pr-body.md

@@ -2,6 +2,17 @@
 
 本文件记录 Harness 的版本变更。Release 构建时由 GitHub Actions 读取（`v*` tag 对应的条目），并附加 git 提交生成 release notes。
 
+## [0.3.5] - 2026-08-30
+
+### 修复
+- **WebView 的导航策略此前一次都没生效过**：`decidePolicyFor` 的 `decisionHandler` 少了 `@MainActor @Sendable`，Swift 就不会把这个方法暴露给 Objective-C，WebKit 用 `respondsToSelector:` 探测不到便按默认策略放行——外链因此一直在应用窗口里打开，而不是交给系统浏览器。六个测试只测那个纯函数，全过也测不出委托根本没被调用；现在由 selector 暴露测试钉住
+- 公证脚本的两条报错分支会先把自己搞崩：变量紧跟全角标点（`$APP，`、`（$REQUEST_ID）`）在 macOS 自带的 bash 3.2 下会把标点并进变量名，`set -u` 当场中止。其中一条正是公证失败后去拉 Apple 逐条日志的那行——最需要诊断的时候什么都拿不到
+- 签名降级不再只留在 CI 日志里：ad-hoc 或未公证的构建会把「首次打开需要右键 →「打开」」写进 release notes。此前流水线注释声称会这么做，实际并没有，用户只会看到一个打不开的应用
+- `CHANGELOG.md` 缺少本次版本条目时，发布流水线给出 `::warning::`：版本号由 CI 自动 +1，手写条目对不上时 release notes 会静悄悄地只剩提交列表
+
+### 安全
+- 跟随上游的 PR 标题与提交信息改从环境变量取值，不再把 npm / nodejs.org 返回的版本字符串直接展开进 shell 脚本文本（同一份文件里的 diff 早已这么处理，这两处漏了）
+
 ## [0.3.4] - 2026-08-30
 
 ### 修复
