@@ -2,6 +2,11 @@
 
 本文件记录 Harness 的版本变更。Release 构建时由 GitHub Actions 读取（`v*` tag 对应的条目），并附加 git 提交生成 release notes。
 
+## [0.3.1] - 2026-08-30
+
+### 修复
+- CI 导入 Developer ID 证书失败时，用 OpenSSL 重新封装为兼容的 PKCS#12 格式后重试，解决 GitHub macOS runner 报 `SecKeychainItemImport: Unknown format in import`
+
 ## [0.3.0] - 2026-08-29
 
 ### 新增

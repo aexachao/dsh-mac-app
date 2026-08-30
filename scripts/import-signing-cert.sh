@@ -18,7 +18,9 @@ set -euo pipefail
 KEYCHAIN="${RUNNER_TEMP:-/tmp}/harness-signing.keychain-db"
 KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 24)}"
 P12="$(umask 077 && mktemp -t harness-cert)"
-trap 'rm -f "$P12"' EXIT
+CLEANUP=("$P12")
+cleanup() { for f in "${CLEANUP[@]}"; do rm -f "$f"; done; }
+trap cleanup EXIT
 
 printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$P12"
 
@@ -27,8 +29,19 @@ security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security set-keychain-settings -lut 21600 "$KEYCHAIN"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 
-security import "$P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
-  -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+if ! security import "$P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
+  -T /usr/bin/codesign -T /usr/bin/security >/dev/null 2>&1; then
+  # 部分 macOS runner 的 security 无法读取新版 PKCS#12，先用 OpenSSL
+  # 重新封装成兼容格式；密码错误也会在这里给出明确诊断。
+  PEM="$(umask 077 && mktemp -t harness-cert-pem)"
+  COMPAT_P12="$(umask 077 && mktemp -t harness-cert-compat)"
+  CLEANUP+=("$PEM" "$COMPAT_P12")
+  openssl pkcs12 -in "$P12" -passin env:MACOS_CERT_PASSWORD -nodes -out "$PEM"
+  openssl pkcs12 -export -legacy -in "$PEM" -out "$COMPAT_P12" \
+    -passout env:MACOS_CERT_PASSWORD
+  security import "$COMPAT_P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
+    -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+fi
 
 # 少了这一步，codesign 用私钥时会弹 UI 授权框——在 runner 上就是无限挂住。
 security set-key-partition-list -S apple-tool:,apple:,codesign: \
