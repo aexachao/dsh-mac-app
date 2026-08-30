@@ -133,20 +133,35 @@ jobs:
           echo "$SIGNING" > "dist/signing-${{ matrix.label }}.txt"
 
       # 打包必须在公证与装订之后：票据装订到 .app 自身，先打的包里没有它。
-      - name: Package
+      #
+      # 发 dmg 而不是 zip：zip 解压出来的 .app 带隔离标记，在原地双击会触发
+      # App Translocation——应用被搬到 /var/folders 下的只读临时挂载点执行，路径每次
+      # 都不一样，TCC 授权、单实例锁、日志目录全跟着乱。dmg 里摆一个指向 /Applications
+      # 的符号链接，用户拖过去再打开，这一类问题从源头消失。
+      - name: Package dmg
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          CODESIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
         run: |
           NAME="Harness-${VERSION}-macos-${{ matrix.label }}"
+          # 上一步已经算出这次构建到了哪个档次，这里不重复判断凭据。
+          # dmg 要单独公证一次：.app 里的票据不覆盖 dmg 自己的隔离标记，
+          # 少这一步用户下载后仍会看到「无法验证开发者」。
+          if [ "$(cat "dist/signing-${{ matrix.label }}.txt")" = "notarized" ]; then
+            export NOTARIZE=1
+          fi
+          ./scripts/make-dmg.sh dist/Harness.app "dist/${NAME}.dmg"
           cd dist
-          ditto -c -k --keepParent "Harness.app" "${NAME}.zip"
-          shasum -a 256 "${NAME}.zip" > "${NAME}.sha256"
+          shasum -a 256 "${NAME}.dmg" > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
           name: harness-${{ matrix.label }}
           path: |
-            dist/*.zip
+            dist/*.dmg
             dist/*.sha256
             dist/signing-*.txt
 
@@ -162,7 +177,7 @@ jobs:
       - name: Assemble assets and notes
         run: |
           mkdir -p out
-          find artifacts -name '*.zip' -exec mv {} out/ \;
+          find artifacts -name '*.dmg' -exec mv {} out/ \;
           find artifacts -name '*.sha256' -exec cat {} + > out/SHA256SUMS.txt
           cp artifacts/release-notes/notes-body.md notes.md
 
@@ -171,14 +186,15 @@ jobs:
           # 任一架构降级就整体提示：两个包同源，用户也只会读一份说明。
           SIGNING_WARN=""
           if grep -rqx 'adhoc' artifacts/*/signing-*.txt 2>/dev/null; then
-            SIGNING_WARN="⚠️ 本次构建**未使用 Developer ID 签名**（ad-hoc）：首次打开请右键点击应用 →「打开」，或到「系统设置 → 隐私与安全性」里点「仍要打开」。"
+            SIGNING_WARN="⚠️ 本次构建**未使用 Developer ID 签名**（ad-hoc）：拖进「应用程序」后，首次打开请右键点击应用 →「打开」，或到「系统设置 → 隐私与安全性」里点「仍要打开」。"
           elif grep -rqx 'signed' artifacts/*/signing-*.txt 2>/dev/null; then
-            SIGNING_WARN="⚠️ 本次构建已用 Developer ID 签名但**未经 Apple 公证**：首次打开可能需要到「系统设置 → 隐私与安全性」里点「仍要打开」。"
+            SIGNING_WARN="⚠️ 本次构建已用 Developer ID 签名但**未经 Apple 公证**：拖进「应用程序」后，首次打开可能需要到「系统设置 → 隐私与安全性」里点「仍要打开」。"
           fi
 
           # 架构不是随便分的，用户下错了包连不上 —— 说明写在最前面
           {
-            echo "下载对应你 Mac 的包：Apple Silicon（M 系列）选 apple-silicon，Intel 选 intel。"
+            echo "下载对应你 Mac 的 dmg：Apple Silicon（M 系列）选 apple-silicon，Intel 选 intel。"
+            echo "打开 dmg，把 Harness 拖进「应用程序」，然后从「应用程序」里启动（直接在 dmg 里双击会以只读方式运行）。"
             echo "dsh 运行时已捆绑在应用内，不需要预先安装 Node.js。"
             if [ -n "$SIGNING_WARN" ]; then echo ""; echo "$SIGNING_WARN"; fi
             echo ""
@@ -195,6 +211,6 @@ jobs:
         run: |
           cd out
           gh release create "${{ needs.prepare.outputs.tag }}" \
-            *.zip SHA256SUMS.txt \
+            *.dmg SHA256SUMS.txt \
             --title "Harness ${{ needs.prepare.outputs.version }}" \
             --notes-file notes.md

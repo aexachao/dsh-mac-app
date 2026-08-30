@@ -19,6 +19,27 @@
 
 下载即可用：Node.js 与 dsh 都已捆绑在应用里，不需要预先安装任何东西，也不必等首次启动下载几百 MB 依赖。
 
+## 下载安装
+
+到 [Releases](https://github.com/aexachao/dsh-mac-app/releases/latest) 下载对应你 Mac 架构的 dmg：
+
+| 你的 Mac | 下载 |
+|---|---|
+| Apple Silicon（M1/M2/M3/M4） | `Harness-<版本>-macos-apple-silicon.dmg` |
+| Intel | `Harness-<版本>-macos-intel.dmg` |
+
+不确定是哪种：左上角  → 「关于本机」，「芯片」写 Apple M 系列就是 Apple Silicon。**装错架构起不来**，原因见下文「为什么按架构出包」。
+
+1. 打开 dmg
+2. 把 **Harness** 拖到「应用程序」
+3. 从「应用程序」（或启动台）里打开
+
+第三步的措辞是认真的：不要直接在 dmg 窗口里双击运行。macOS 会把还带隔离标记的应用搬到一个只读临时挂载点里执行（App Translocation），路径每次启动都不一样，于是单实例锁认不出自己、文件夹访问授权反复弹窗。
+
+发布包经 Apple 公证并装订票据，正常情况下双击即可打开，不需要右键或去「隐私与安全性」里放行。如果某次发布的说明里出现了签名降级的提示（CI 缺证书时会退回自签），按那段提示操作。
+
+想校验完整性：Release 里的 `SHA256SUMS.txt` 对应 `shasum -a 256 <下载的 dmg>`。
+
 ## 功能
 
 - **开箱即用** — 定版的 Node.js 与 dsh 随应用分发（按架构出包，下载对应你 Mac 的那个），不依赖本机环境；也可在设置中改用本机安装的 dsh
@@ -56,11 +77,11 @@ swift test
 ## 技术说明
 
 - 原生 SwiftUI + WKWebView（无 Electron），AppKit 手动入口掌控菜单与窗口
-- 服务以 `node <dsh boot> web` 直接子进程运行，退出时干净终止
+- 服务以 `node <dsh 入口> --profile web --port <端口> --no-open` 直接子进程运行，退出时干净终止。三个参数都不是可选的写法：`dsh web` 子命令形式会拒绝父级的 `--profile` / `--patch`（安全模式的配置 overlay 正是靠 `--patch` 进去的），端口由应用先探测可绑定再显式传入，`--no-open` 则是因为 dsh 自己会去开系统浏览器——而应用窗口本身就是那个页面
 - 运行时解析（`RuntimeLocator`，纯函数）：捆绑那份完整就用它 → 否则本机 node + npx 缓存里的 dsh → 有 node 没 dsh 就先装 → 都没有则报「缺 node」。设置里打开「改用本机 dsh」后前两条对调，但本机连 node 都没有时仍回到捆绑那份——能启动比尊重偏好重要。`swift run` 的开发构建没有 `.app` 外壳，查找自然全部落空，日常开发不受捆绑影响
 - 捆绑布局由 `scripts/vendor-runtime.sh` 写入 `Contents/Resources/runtime/`（`node/`、`dsh/`、`manifest.json`）；三条相对路径是脚本与应用之间唯一的接口，被单元测试钉死——改一边忘了改另一边只会静悄悄退回下载路径，不报任何错
-- 签名与公证：所有嵌套 Mach-O 由内向外逐个签（不用 `--deep`），全程开加固运行时；JIT / 未签名可执行内存 / 关闭库校验三条豁免只给捆绑的 node，应用本体没有任何豁免。`scripts/notarize.sh` 先本地预检（签名权威、`runtime` 标志、时间戳）再送 Apple，票据装订到 `.app` 之后才打包
-- 发布按架构出两个包，`runtime-pins.json` 锁定 node 与 dsh 版本（含 SHA256）；`follow-upstream.yml` 每天检查上游并开 PR，node 只在锁定的大版本内跟随
+- 签名与公证：所有嵌套 Mach-O 由内向外逐个签（不用 `--deep`），全程开加固运行时；JIT / 未签名可执行内存 / 关闭库校验三条豁免只给捆绑的 node，应用本体没有任何豁免。`scripts/notarize.sh` 先本地预检（签名权威、`runtime` 标志、时间戳）再送 Apple，票据装订到 `.app` 之后才打 dmg；dmg 本身再签名、公证、装订一次——应用里的票据不解除容器的隔离标记
+- 发布按架构出两个 dmg，`runtime-pins.json` 锁定 node 与 dsh 版本（含 SHA256）；`follow-upstream.yml` 每天检查上游并开 PR，node 只在锁定的大版本内跟随
 - `ServerManager` 状态机：`starting / running / external / failed`；显式指定端口、冲突时退让、只清理可确认的 dsh 残留进程
 - 单实例锁用 `flock` 而非 pid 文件（`~/Library/Application Support/Harness/instance.lock`）：锁随进程消失，崩溃后不会留下解不开的死锁；抢不到锁就激活已有实例并退出
 - 安全模式：静态扫描 `~/.dsh/profiles/web` 的 `package.json` + 各 bundle 的 `cordis.patch.yml` 得到插件清单（不需要 dsh 能启动），把「停用第三方插件」写成 `~/Library/Application Support/Harness/safe-mode.yml`，以 `--patch` 叠加
@@ -101,7 +122,8 @@ Sources/DSHWeb/
 scripts/
 ├── build.sh                 # SwiftPM 编译 → .app 组装 → 签名 → 公证 → 安装
 ├── vendor-runtime.sh        # 按 runtime-pins.json 备好 node 与 dsh（校验 SHA256）
-├── notarize.sh              # 本地预检 → 送 Apple 公证 → 装订票据 → Gatekeeper 复核
+├── notarize.sh              # 本地预检 → 送 Apple 公证 → 装订票据 → Gatekeeper 复核（.app 与 .dmg 通用）
+├── make-dmg.sh              # .app → dmg（带「应用程序」符号链接，可选签名与公证）
 ├── import-signing-cert.sh   # CI：把 Developer ID 证书导入临时钥匙串
 └── check-upstream.sh        # 检查上游版本并更新 runtime-pins.json
 runtime-pins.json            # 捆绑运行时的版本锁（node / dsh + SHA256）
@@ -114,9 +136,7 @@ assets/runtime.entitlements  # 只给捆绑 node 的三条豁免
 - 其他都不用装。Node.js（24.20.0）与 DeepSeek Harness（0.1.1-rc.2）随应用分发，版本锁在 `runtime-pins.json`，构建时按 SHA256 校验后才打进包
 - 只有在设置里打开「改用本机 dsh」时才需要本机 Node.js（自动探测 nvm / Homebrew / 系统路径），dsh 缺失时会通过 npx 安装
 
-代价是包变大：捆绑的运行时未压缩约 384 MB（node 134 MB + dsh 依赖树 250 MB），压缩后约 115 MB。换来的是首次启动不下载、不联网、不受本机环境影响。
-
-下载时注意选对架构：Apple Silicon（M 系列）用 `apple-silicon`，Intel 用 `intel`。装错了起不来，原因见上文「为什么按架构出包」。
+代价是包变大：捆绑的运行时未压缩约 384 MB（node 134 MB + dsh 依赖树 250 MB），压缩进 dmg 后约 115 MB。换来的是首次启动不下载、不联网、不受本机环境影响。
 
 ## 开源协议与贡献
 

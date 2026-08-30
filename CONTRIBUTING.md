@@ -75,7 +75,7 @@ PRECHECK_ONLY=1 ./scripts/notarize.sh dist/Harness.app
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-CI 会自动：跑测试 → 在 `macos-15` 与 `macos-15-intel` 上各自捆绑运行时并构建 → 签名 + 公证 + 装订票据 → 打包 zip 与 SHA256 → 从 CHANGELOG 提取条目 + 生成提交列表 → 创建 GitHub Release。产物是两个包（`apple-silicon` / `intel`），不出 universal——dsh 依赖树含平台专属原生模块，一份 `node_modules` 只能属于一个架构。
+CI 会自动：跑测试 → 在 `macos-15` 与 `macos-15-intel` 上各自捆绑运行时并构建 → 签名 + 公证 + 装订票据 → 打成 dmg（dmg 本身再签名、公证、装订一次）与 SHA256 → 从 CHANGELOG 提取条目 + 生成提交列表 → 创建 GitHub Release。产物是两个 dmg（`apple-silicon` / `intel`），不出 universal——dsh 依赖树含平台专属原生模块，一份 `node_modules` 只能属于一个架构。
 
 完整签名与公证需要以下仓库 secrets；缺失时会降级而不是失败（缺证书 → ad-hoc 签名，缺 API 密钥 → 只签名不公证），并在日志里给出 warning：
 

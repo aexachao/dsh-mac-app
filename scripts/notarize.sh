@@ -1,8 +1,12 @@
 #!/bin/bash
-# 公证并装订 Harness.app：预检签名 → 提交 Apple 公证 → 装订票据 → 校验。
+# 公证并装订：预检签名 → 提交 Apple 公证 → 装订票据 → 校验。
 #
 # 用法：
-#   ./scripts/notarize.sh dist/Harness.app
+#   ./scripts/notarize.sh dist/Harness.app                  # 应用本体
+#   ./scripts/notarize.sh dist/Harness-0.3.5-….dmg          # 分发用的 dmg
+#
+# 两种目标走同一条凭据与提交逻辑，区别只在：.app 要先打成 zip 才能提交（notarytool
+# 不吃目录）且预检项更多（加固运行时、时间戳）；.dmg 直接提交，预检只看签名权威。
 #
 # 凭据（二选一，都从环境变量读，脚本不落盘、不回显）：
 #   A. App Store Connect API 密钥（CI 首选，可撤销、不绑账号密码）
@@ -19,44 +23,58 @@
 #   NOTARY_TIMEOUT   等待公证结论的上限，默认 30m
 set -euo pipefail
 
-APP="${1:-dist/Harness.app}"
+TARGET="${1:-dist/Harness.app}"
 cd "$(dirname "$0")/.."
 
-if [ ! -d "$APP" ]; then
-  echo "!! 找不到 ${APP}，先跑 ./scripts/build.sh" >&2
+case "$TARGET" in
+  *.dmg) MODE=dmg ;;
+  *)     MODE=app ;;
+esac
+
+if [ "$MODE" = "app" ] && [ ! -d "$TARGET" ]; then
+  echo "!! 找不到 ${TARGET}，先跑 ./scripts/build.sh" >&2
+  exit 1
+fi
+if [ "$MODE" = "dmg" ] && [ ! -f "$TARGET" ]; then
+  echo "!! 找不到 ${TARGET}，先跑 ./scripts/make-dmg.sh" >&2
   exit 1
 fi
 
 # ---------- 预检 ----------
-# Apple 拒绝一次要几分钟，而这三件事在本地一秒就能查出来。三条都是公证的硬性前提：
-#   1. Developer ID Application 签名（自签名/ad-hoc 一律拒绝）
-#   2. 加固运行时（flags 里有 runtime）
-#   3. 安全时间戳（本地构建默认关掉了，发布必须开）
+# Apple 拒绝一次要几分钟，而这几件事在本地一秒就能查出来。
+#   .app：Developer ID Application 签名 + 加固运行时 + 安全时间戳，三条都是硬性前提
+#   .dmg：只看签名权威——dmg 不是可执行代码，没有加固运行时这回事
 precheck() {
   local info
-  info="$(codesign -dv --verbose=4 "$APP" 2>&1)"
+  info="$(codesign -dv --verbose=4 "$TARGET" 2>&1)"
 
   if ! grep -q "Authority=Developer ID Application" <<<"$info"; then
-    echo "!! $APP 不是 Developer ID Application 签名，公证一定被拒。" >&2
+    echo "!! $TARGET 不是 Developer ID Application 签名，公证一定被拒。" >&2
     echo "   用发布身份重签：CODESIGN_IDENTITY=\"Developer ID Application: <名字> (<TeamID>)\" ./scripts/build.sh" >&2
     echo "   钥匙串里现有的签名身份：" >&2
     security find-identity -v -p codesigning | sed 's/^/     /' >&2
     return 1
   fi
 
+  if [ "$MODE" = "dmg" ]; then
+    codesign --verify --strict --verbose=1 "$TARGET"
+    echo "==> 预检通过：dmg 已用 Developer ID 签名"
+    return 0
+  fi
+
   if ! grep -qE 'flags=.*runtime' <<<"$info"; then
-    echo "!! $APP 没启用加固运行时（--options runtime），公证一定被拒。" >&2
+    echo "!! $TARGET 没启用加固运行时（--options runtime），公证一定被拒。" >&2
     return 1
   fi
 
   if ! grep -q "Timestamp=" <<<"$info"; then
-    echo "!! $APP 没有安全时间戳。build.sh 只对 Developer ID 身份开 --timestamp，" >&2
+    echo "!! $TARGET 没有安全时间戳。build.sh 只对 Developer ID 身份开 --timestamp，" >&2
     echo "   出现这条说明签名身份不对或签名时断网。" >&2
     return 1
   fi
 
   # 嵌套的 Mach-O 也得各自满足同样条件；--deep --strict 会连带检查它们的签名有效性。
-  codesign --verify --deep --strict --verbose=1 "$APP"
+  codesign --verify --deep --strict --verbose=1 "$TARGET"
   echo "==> 预检通过：Developer ID + 加固运行时 + 安全时间戳"
 }
 
@@ -100,17 +118,22 @@ else
 fi
 
 # ---------- 提交 ----------
-# notarytool 只吃 zip/dmg/pkg，所以先打一个"提交用"的包。它与最终分发的包不是同一个：
-# 票据是装订到 .app 上的，装订完必须重新打包（见下），否则用户下到的还是没票据的那份。
-SUBMIT_DIR="$(mktemp -d -t harness-notarize)"
-CLEANUP+=("$SUBMIT_DIR")
-SUBMIT_ZIP="$SUBMIT_DIR/$(basename "$APP" .app).zip"
-echo "==> 打包待公证：$SUBMIT_ZIP"
-ditto -c -k --keepParent "$APP" "$SUBMIT_ZIP"
+# notarytool 只吃 zip/dmg/pkg。dmg 可以直接提交；.app 是目录，得先打一个"提交用"的包。
+# 那个包与最终分发的不是同一个：票据装订到 .app 上，装订完必须重新打包（见下），
+# 否则用户下到的还是没票据的那份。
+if [ "$MODE" = "dmg" ]; then
+  SUBMIT_FILE="$TARGET"
+else
+  SUBMIT_DIR="$(mktemp -d -t harness-notarize)"
+  CLEANUP+=("$SUBMIT_DIR")
+  SUBMIT_FILE="$SUBMIT_DIR/$(basename "$TARGET" .app).zip"
+  echo "==> 打包待公证：${SUBMIT_FILE}"
+  ditto -c -k --keepParent "$TARGET" "$SUBMIT_FILE"
+fi
 
 echo "==> 提交公证（等待结论，最长 ${NOTARY_TIMEOUT:-30m}）"
 set +e
-SUBMIT_LOG="$(xcrun notarytool submit "$SUBMIT_ZIP" "${CREDS[@]}" \
+SUBMIT_LOG="$(xcrun notarytool submit "$SUBMIT_FILE" "${CREDS[@]}" \
   --wait --timeout "${NOTARY_TIMEOUT:-30m}" 2>&1)"
 SUBMIT_STATUS=$?
 set -e
@@ -131,18 +154,25 @@ if [ $SUBMIT_STATUS -ne 0 ] || ! grep -q "status: Accepted" <<<"$SUBMIT_LOG"; th
 fi
 
 # ---------- 装订与校验 ----------
-# 装订把票据写进 .app 自己：用户首次打开时无需联网，Gatekeeper 也能放行。
+# 装订把票据写进目标自己：用户首次打开时无需联网，Gatekeeper 也能放行。
+# .app 与 .dmg 都要各自装订——dmg 里那份 .app 的票据不覆盖 dmg 本身的隔离标记。
 echo "==> 装订票据"
-xcrun stapler staple "$APP"
+xcrun stapler staple "$TARGET"
 
 echo "==> 校验"
-xcrun stapler validate "$APP"
+xcrun stapler validate "$TARGET"
 # spctl 是 Gatekeeper 自己的判断，与 codesign --verify 不是一回事：
 # 后者只说签名完整，前者才说"这台机器会不会放它过"。
+# dmg 不是可执行代码，要按"打开这个文件"来评估（--type open），用 --type exec 会直接
+# 报 rejected，看着像公证失败其实是问错了问题。
+ASSESS=(--assess --type exec)
+if [ "$MODE" = "dmg" ]; then
+  ASSESS=(--assess --type open --context context:primary-signature)
+fi
 if spctl --status 2>&1 | grep -q "assessments disabled"; then
   echo "!! 本机 Gatekeeper 评估已关闭，spctl 不能提供有效结论，跳过这一步。" >&2
   echo "   公证票据仍已通过 stapler 校验；请在启用 Gatekeeper 的 Mac 上复核安装包。" >&2
 else
-  spctl --assess --type exec --verbose=4 "$APP"
+  spctl "${ASSESS[@]}" --verbose=4 "$TARGET"
 fi
-echo "==> 公证完成：$APP"
+echo "==> 公证完成：${TARGET}"
