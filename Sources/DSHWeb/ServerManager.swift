@@ -122,16 +122,45 @@ final class ServerManager {
         return true
     }
 
-    /// 停止服务进程（退出/重试前调用）。
+    /// 停止服务进程连同它派生出来的整棵子孙树（退出/重试前调用）。
+    ///
+    /// 只 terminate 直接子进程收不干净：dsh 的插件会自己 spawn 常驻进程（实测
+    /// dsh-doctor 的 supervisor 连 SIGTERM 都不理），node 一死它们被 launchd 收养，
+    /// 于是活过应用退出、继续占着端口和应用所在的挂载点。
+    ///
+    /// **名单必须在杀父进程之前抓**：父进程一退出，子孙的 PPID 全变成 1，那棵树就
+    /// 再也认不出来了——那时候只剩「按命令行猜哪个是我们的」，而那正是我们要避免的。
+    ///
+    /// 同步执行（含最长 `stopGraceSeconds` 的等待）：两个终止钩子都是同步的，
+    /// 起 Task 轮不到执行就随进程一起没了。
     func stop() {
-        if let process {
-            if process.isRunning {
-                log("[dsh-web] 停止服务…")
-                process.terminate()
-            }
-            self.process = nil
+        guard let process else { return }
+        let root = process.processIdentifier
+        let descendants = ProcessTree.descendants(of: root)
+
+        if process.isRunning {
+            log("[dsh-web] 停止服务…")
+        }
+        // 先摘掉引用再终止：terminationHandler 靠 `self.process === p` 判断这次退出
+        // 是不是我们主动要的，摘早了才不会把一次正常停止报成启动失败。
+        self.process = nil
+        if process.isRunning {
+            process.terminate()
+        }
+
+        guard !descendants.isEmpty else { return }
+        log("[dsh-web] 一并终止 \(descendants.count) 个由服务派生的子孙进程（\(describe(descendants.map(Int.init)))）。")
+        let forced = ProcessTree.terminate(descendants, grace: Self.stopGraceSeconds)
+        if !forced.isEmpty {
+            log("[dsh-web] \(forced.count) 个子孙进程在 \(Self.stopGraceSeconds)s 内未退出，已强制终止（\(describe(forced.map(Int.init)))）。")
         }
     }
+
+    /// SIGTERM 之后给子孙进程的退出宽限；到点仍在的一律 SIGKILL。
+    ///
+    /// 这段时间是**卡在退出路径上**的，长了用户会觉得应用退不掉；插件那些进程收到
+    /// SIGTERM 后要么立刻走，要么根本不打算走，等更久换不到什么。
+    static let stopGraceSeconds: TimeInterval = 1.5
 
     /// 重启：彻底重启 — 停自己的进程、等待端口释放、清理**可确认的** dsh 残留进程，
     /// 然后启动新服务（保证插件/配置变更生效）。

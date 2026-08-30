@@ -57,22 +57,16 @@ enum MenuBuilder {
     /// 当前构建的菜单（守护 Timer 用它判断是否被覆盖）。
     private nonisolated(unsafe) static var lastMenu: NSMenu?
 
-    /// 诊断：把当前 mainMenu 结构追加到文件（验证菜单是否被覆盖）。
-    @MainActor static func dumpMenuState(_ tag: String) {
-        let lines = NSApp.mainMenu?.items.compactMap { item -> String? in
+    /// 诊断：把当前 mainMenu 结构记进日志（验证菜单是否被覆盖）。
+    ///
+    /// 去重与限长的策略都在 `MenuStateLog`：周期快照每 3 秒来一次，不去重会把日志
+    /// 写到几十 MB，真正有用的那几行反而被埋掉。
+    @MainActor static func dumpMenuState(_ event: MenuStateLog.Event) {
+        let body = NSApp.mainMenu?.items.compactMap { item -> String? in
             let subs = item.submenu?.items.compactMap { $0.title.isEmpty ? nil : $0.title }.joined(separator: "|") ?? ""
             return "\(item.title): \(subs)"
         }.joined(separator: "\n") ?? "nil"
-        let text = "=== \(tag) ===\n\(lines)\n"
-        if let data = text.data(using: .utf8) {
-            if let fh = FileHandle(forWritingAtPath: "/tmp/menu-state.log") {
-                fh.seekToEndOfFile()
-                fh.write(data)
-                try? fh.close()
-            } else {
-                try? text.write(toFile: "/tmp/menu-state.log", atomically: true, encoding: .utf8)
-            }
-        }
+        MenuStateLog.record(event, body: body)
     }
 
     @MainActor static func rebuild() {
@@ -82,13 +76,13 @@ enum MenuBuilder {
         let menu = buildMenu(language: current)
         lastMenu = menu
         NSApp.mainMenu = menu
-        dumpMenuState("rebuild-set")
+        dumpMenuState(.rebuildSet)
         DispatchQueue.main.async { [self] in
             guard lastMenu !== NSApp.mainMenu else { return }
             let menu = buildMenu(language: current)
             lastMenu = menu
             NSApp.mainMenu = menu
-            dumpMenuState("rebuild-delayed")
+            dumpMenuState(.rebuildDelayed)
         }
     }
 
@@ -100,12 +94,12 @@ enum MenuBuilder {
             MainActor.assumeIsolated {
                 if let lastMenu, NSApp.mainMenu !== lastMenu {
                     menuLog.info("guard: menu overridden, rebuilding")
-                    dumpMenuState("guard-override")
+                    dumpMenuState(.guardOverride)
                     rebuild()
                 }
                 tick += 1
                 if tick % 3 == 0 {
-                    dumpMenuState("tick")
+                    dumpMenuState(.tick)
                 }
             }
         }
