@@ -51,4 +51,30 @@ struct WebViewNavigationTests {
             url: url, isUserInitiated: false, opensNewWindow: false, appHost: "127.0.0.1")
         #expect(stay == true)
     }
+
+    /// 上面六个测试全过、导航策略却完全没生效过——因为它们只测纯函数，
+    /// 谁都没验证过 WebKit 真的会来调那个委托方法。
+    ///
+    /// `WKNavigationDelegate` 的方法是 optional 的，WebKit 通过 `respondsToSelector:`
+    /// 探测。Swift 只把**签名完全一致**的方法暴露给 Objective-C；decisionHandler
+    /// 少了 `@MainActor @Sendable` 就变成另一个方法，selector 不存在，WebKit 探测失败
+    /// 后走默认放行——外链在 WebView 内打开，`shouldStayInWebView` 一次也不会被调用。
+    /// 编译器只给一句 "nearly matches optional requirement" 的警告。
+    @Test func navigationDelegateSelectorIsActuallyExposedToWebKit() {
+        let controller = WebViewController()
+        for name in [
+            "webView:decidePolicyForNavigationAction:decisionHandler:",
+            "webView:didFinishNavigation:",
+        ] {
+            #expect(controller.responds(to: NSSelectorFromString(name)),
+                    "WebKit 探测不到 \(name)，该委托方法永远不会被调用")
+        }
+    }
+
+    @Test func scriptMessageHandlerSelectorIsActuallyExposed() {
+        // 注入脚本靠这个 selector 把外链送回原生；签名不匹配就静默失效。
+        let controller = WebViewController()
+        #expect(controller.responds(
+            to: NSSelectorFromString("userContentController:didReceiveScriptMessage:")))
+    }
 }

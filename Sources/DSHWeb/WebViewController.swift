@@ -114,10 +114,18 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHa
         return true
     }
 
+    /// `decisionHandler` 的 `@MainActor @Sendable` 不能省。
+    ///
+    /// `WKNavigationDelegate` 全是 optional 方法，WebKit 用 `respondsToSelector:` 探测；
+    /// Swift 只把签名与 SDK **完全一致**的方法暴露给 Objective-C。少了这两个属性，它就是
+    /// 一个同名的普通 Swift 方法，selector 不存在，WebKit 探测失败后按默认策略放行——
+    /// 外链于是在 WebView 里打开，`shouldStayInWebView` 一次也不会被调用。编译器对此
+    /// 只给一句 "nearly matches optional requirement" 警告。
+    /// 由 `navigationDelegateSelectorIsActuallyExposedToWebKit` 钉住。
     func webView(
         _ webView: WKWebView,
         decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
     ) {
         let stay = Self.shouldStayInWebView(
             url: navigationAction.request.url,
