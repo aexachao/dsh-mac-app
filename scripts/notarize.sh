@@ -132,5 +132,10 @@ echo "==> 校验"
 xcrun stapler validate "$APP"
 # spctl 是 Gatekeeper 自己的判断，与 codesign --verify 不是一回事：
 # 后者只说签名完整，前者才说"这台机器会不会放它过"。
-spctl --assess --type exec --verbose=4 "$APP"
+if spctl --status 2>&1 | grep -q "assessments disabled"; then
+  echo "!! 本机 Gatekeeper 评估已关闭，spctl 不能提供有效结论，跳过这一步。" >&2
+  echo "   公证票据仍已通过 stapler 校验；请在启用 Gatekeeper 的 Mac 上复核安装包。" >&2
+else
+  spctl --assess --type exec --verbose=4 "$APP"
+fi
 echo "==> 公证完成：$APP"

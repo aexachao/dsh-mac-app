@@ -108,7 +108,7 @@ jobs:
           AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
         run: |
           # 公证要三样都在：Developer ID 身份 + API 密钥。缺任何一样就只签名不公证。
-          if [ -n "${CODESIGN_IDENTITY:-}" ] && [ -n "${AC_API_KEY_ID:-}" ] && [ -n "${AC_API_KEY_P8:-}" ]; then
+          if [ -n "${CODESIGN_IDENTITY:-}" ] && [ -n "${AC_API_KEY_ID:-}" ] && [ -n "${AC_API_ISSUER_ID:-}" ] && [ -n "${AC_API_KEY_P8:-}" ]; then
             export NOTARIZE=1
           else
             echo "::warning::跳过公证（缺 Developer ID 身份或 App Store Connect 密钥）"

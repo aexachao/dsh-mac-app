@@ -50,5 +50,6 @@ jobs:
     name: Build and publish
     needs: bump-and-tag
     uses: ./.github/workflows/release.yml
+    secrets: inherit
     with:
       tag: ${{ needs.bump-and-tag.outputs.next }}

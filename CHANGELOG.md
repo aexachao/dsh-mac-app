@@ -12,9 +12,13 @@
 - **CI 每天跟随上游**：`follow-upstream.yml` 检查 npm 与 nodejs.org，`runtime-pins.json` 有变化就开 PR（带 diff 与人工验证清单）。捆绑把「版本漂移」换成了「我们负责跟随」，没有这条线用户装到的就永远是发版那天的版本。dsh 跟 npm `latest`；node 只在锁定的大版本内跟随——跨大版本会换掉 `NODE_MODULE_VERSION`，树里每个预构建 `.node` 都要重来，那是移植而不是升级，必须由人决定
 
 ### 变更
+- 应用 Bundle ID 从开发期的 `local.harness.app` 改为正式的 `com.chrisli.dsh-desktop`
 - **发布改为按架构出两个包**（`apple-silicon` / `intel`），不再出 universal。dsh 的依赖树带平台专属的原生模块（`@img/sharp-darwin-*`、`@koromix/koffi-darwin-*`、`node-pty` 预构建），一份 `node_modules` 只能属于一个架构，universal 装不进两份互斥的树——这不是没做，而是做不到。下载时请选对架构，装错了起不来
 - 压缩包因此变大到约 115 MB（内置运行时未压缩约 384 MB）。换来的是首次启动不下载、不联网、不受本机 Node 环境影响
 - `README.md` 的「依赖」一节：Node.js 不再是使用前提，只有打开逃生开关时才需要
+
+### 修复
+- 自动发布会把仓库 Secrets 传给复用的发布工作流；CI 只有在 App Store Connect API 密钥的 Key ID、Issuer ID 与私钥都齐全时才启用公证；本机关闭 Gatekeeper 时，公证脚本会明确警告 `spctl` 无法完成有效复核
 
 ## [0.2.1] - 2026-08-29
 

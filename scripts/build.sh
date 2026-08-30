@@ -56,7 +56,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>CFBundleDisplayName</key>
 	<string>$NAME</string>
 	<key>CFBundleIdentifier</key>
-	<string>local.harness.app</string>
+	<string>com.chrisli.dsh-desktop</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleExecutable</key>
