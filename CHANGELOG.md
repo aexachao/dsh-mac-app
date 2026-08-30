@@ -2,6 +2,11 @@
 
 本文件记录 Harness 的版本变更。Release 构建时由 GitHub Actions 读取（`v*` tag 对应的条目），并附加 git 提交生成 release notes。
 
+## [0.3.2] - 2026-08-30
+
+### 修复
+- PKCS#12 兼容回退会检测当前 `openssl` 是否支持 `-legacy`，同时兼容本机 OpenSSL 3 与 GitHub macOS runner 的 LibreSSL
+
 ## [0.3.1] - 2026-08-30
 
 ### 修复
