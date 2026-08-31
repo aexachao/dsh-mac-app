@@ -73,6 +73,23 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<string>public.app-category.developer-tools</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hans</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hans</string>
+		<string>en</string>
+	</array>
+	<!-- 隐私授权用途说明。dsh 的插件常以符号链接指向开发仓库，而仓库多半就在
+	     ~/Documents 这类受 TCC 保护的目录里；子进程继承本应用的授权，所以系统
+	     弹的是我们的窗、念的是我们的理由。没有这三个键就没有理由可念，系统只能
+	     直接拒绝，而 dsh 读那条路径时不会报错、会一直卡住。 -->
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Harness 需要访问「文档」文件夹，才能加载你链接到该目录下的 dsh 插件。未授权时读取会一直等待，dsh 将无法启动。</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Harness 需要访问「桌面」文件夹，才能加载你链接到该目录下的 dsh 插件。未授权时读取会一直等待，dsh 将无法启动。</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Harness 需要访问「下载」文件夹，才能加载你链接到该目录下的 dsh 插件。未授权时读取会一直等待，dsh 将无法启动。</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -81,6 +98,22 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# 授权说明按系统语言显示。Info.plist 里那份中文是兜底（开发区域 zh-Hans），
+# 英文系统读 en.lproj —— 这是应用里唯一由系统而非 `Strings.swift` 渲染的用户可见文案。
+for lang in zh-Hans en; do
+  mkdir -p "$APP/Contents/Resources/$lang.lproj"
+done
+cat > "$APP/Contents/Resources/zh-Hans.lproj/InfoPlist.strings" <<'STRINGS'
+"NSDocumentsFolderUsageDescription" = "Harness 需要访问「文档」文件夹，才能加载你链接到该目录下的 dsh 插件。未授权时读取会一直等待，dsh 将无法启动。";
+"NSDesktopFolderUsageDescription" = "Harness 需要访问「桌面」文件夹，才能加载你链接到该目录下的 dsh 插件。未授权时读取会一直等待，dsh 将无法启动。";
+"NSDownloadsFolderUsageDescription" = "Harness 需要访问「下载」文件夹，才能加载你链接到该目录下的 dsh 插件。未授权时读取会一直等待，dsh 将无法启动。";
+STRINGS
+cat > "$APP/Contents/Resources/en.lproj/InfoPlist.strings" <<'STRINGS'
+"NSDocumentsFolderUsageDescription" = "Harness needs access to your Documents folder to load dsh plugins you have linked there. Without access the read never returns and dsh cannot start.";
+"NSDesktopFolderUsageDescription" = "Harness needs access to your Desktop folder to load dsh plugins you have linked there. Without access the read never returns and dsh cannot start.";
+"NSDownloadsFolderUsageDescription" = "Harness needs access to your Downloads folder to load dsh plugins you have linked there. Without access the read never returns and dsh cannot start.";
+STRINGS
 
 # ---------- 捆绑运行时 ----------
 # 默认不备：日常 swift build / 本地迭代不需要多等一次 400 MB 的拷贝，`RuntimeLocator`

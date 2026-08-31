@@ -121,6 +121,29 @@ enum PluginInventory {
         return bundles
     }
 
+    // MARK: - 后台扫描
+
+    /// 扫描的时间上限（秒）。正常一次只读十来个小文件，是毫秒级的事；这个上限不是为
+    /// 「慢」准备的，是为「永远不返回」准备的。
+    static let scanTimeout: TimeInterval = 3
+
+    /// 在后台线程扫描，并且**一定会返回**。
+    ///
+    /// 为什么非要离开主线程、非要有上限：`node_modules` 里的插件可以是指向任何位置的
+    /// 符号链接，而 `~/Documents` 这类目录受 TCC 保护，没授权时 `open()` 既不返回也不
+    /// 报错——`try?` 兜得住错误，兜不住阻塞。这段代码原先跑在主线程上，撞上那种路径
+    /// 整个应用就冻住：日志面板打不开，⌘Q 也退不掉，用户只剩强制退出这一条路。
+    ///
+    /// 超时返回 nil 而不是空数组：调用方必须能区分「确实没有插件」和「没扫完」，
+    /// 后者不该被写成一份「没有插件需要停用」的 overlay。至于被卡住的那条线程，
+    /// 放弃它就是了（见 `Deadline`）。
+    static func scanInBackground(
+        profileDirectory: URL,
+        timeout: TimeInterval = scanTimeout
+    ) async -> [PluginRef]? {
+        await Deadline.run(timeout: timeout) { scan(profileDirectory: profileDirectory) }
+    }
+
     // MARK: - 待禁用清单
 
     /// 安全模式要禁用的 id：第三方 bundle 带来的插件，去重后排序。

@@ -86,10 +86,13 @@ final class ServerManager {
     /// 模式——界面会显示「已停用插件」，而实际上什么都没停用。
     func start() {
         guard process == nil else { return }
+        // 已接管的外部实例没有 `process`，光靠上一行拦不住它：关窗再开窗若让
+        // `onAppear` 再跑一次，就会在已经好好跑着的服务旁边再探测、甚至另起一个。
+        if case .external = state { return }
         log("[dsh-web] 启动中…")
         Task {
             if !shouldUseSafeMode, await adoptExternalService(on: PortStrategy.defaultPort) { return }
-            launchServer()
+            await launchServer()
         }
     }
 
@@ -177,7 +180,7 @@ final class ServerManager {
                 await waitForPortRelease(port, attempts: 15)
             }
             // 3. 端口还是拿不回来时，launchServer 会自动退让到下一个空闲端口
-            launchServer()
+            await launchServer()
         }
     }
 
@@ -231,7 +234,7 @@ final class ServerManager {
 
     // MARK: - 服务进程
 
-    private func launchServer() {
+    private func launchServer() async {
         state = .starting
         // 先定运行时：捆绑那份齐全时用它，否则退回本机的 node + npx 缓存。
         // 判定本身是纯函数（`RuntimeLocator.plan`），这里只负责把磁盘上的事实喂给它。
@@ -248,7 +251,8 @@ final class ServerManager {
             log("[dsh-web] 端口 \(PortStrategy.defaultPort) 已被占用，本次改用 \(chosen)。")
         }
         port = chosen
-        let overlay = prepareSafeModeIfNeeded()
+        let overlay = await prepareSafeModeIfNeeded()
+        auditPluginPaths()
 
         switch plan {
         case .noNode:
@@ -497,7 +501,7 @@ final class ServerManager {
     ///
     /// 写不出 overlay 时返回 nil，正常启动。安全模式是补救手段，它自己失败不该把
     /// 一次本来可能成功的启动也拖掉。
-    private func prepareSafeModeIfNeeded() -> URL? {
+    private func prepareSafeModeIfNeeded() async -> URL? {
         guard shouldUseSafeMode else {
             isSafeMode = false
             disabledPlugins = []
@@ -509,7 +513,16 @@ final class ServerManager {
             log("[dsh-web] 连续 \(streak.value) 次启动异常，本次进入安全模式。")
         }
 
-        let plugins = PluginInventory.scan(profileDirectory: SafeModeOverlay.profileDirectory)
+        // 扫描放到后台并带时限：插件目录可能链到受 TCC 保护的位置，那里的 `open()`
+        // 不返回也不报错。这一段以前跑在主线程上，撞上就是整个应用冻住（见 `Deadline`）。
+        guard let plugins = await PluginInventory.scanInBackground(
+            profileDirectory: SafeModeOverlay.profileDirectory
+        ) else {
+            log("[dsh-web] 安全模式：插件清单扫描超时（有目录读不动，见下方路径体检），本次按正常模式启动。")
+            isSafeMode = false
+            disabledPlugins = []
+            return nil
+        }
         let disable = PluginInventory.thirdPartyIDs(in: plugins)
         do {
             let url = try SafeModeOverlay.write(disabling: disable)
@@ -548,6 +561,28 @@ final class ServerManager {
         restart()
     }
 
+    // MARK: - 插件路径体检
+
+    /// 后台体检插件路径，把「链到隐私保护目录、现在读不动」的插件连同处置办法写进日志。
+    ///
+    /// 不等它、也不因它阻止启动：dsh 可能照样能起来（用户此前授权过），而万一起不来，
+    /// 日志里这几行就是唯一能把「界面停在启动中、异常一行都没有、九十秒后才报无响应」
+    /// 解释清楚的东西——否则查到病根要靠 `sample` 抓 node 的调用栈。
+    private func auditPluginPaths() {
+        let profile = SafeModeOverlay.profileDirectory
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        Task {
+            let blocked = await PluginPathAudit.blocked(profileDirectory: profile, home: home)
+            guard !blocked.isEmpty else { return }
+            for finding in blocked {
+                log("[dsh-web] ⚠️ 插件路径体检：\(finding.bundle) 链到 \(finding.target)，此刻读不到。")
+            }
+            let directories = Set(blocked.map(\.protectedDirectory)).sorted().joined(separator: "、")
+            log("[dsh-web] ~/\(directories) 受 macOS 隐私保护，未授权时读取不是报错、是一直卡住，dsh 会因此起不来。")
+            log("[dsh-web] 处置：系统设置 → 隐私与安全性 → 文件与文件夹，允许 Harness 访问上述目录；或把插件移出这些目录。")
+        }
+    }
+
     // MARK: - 日志与状态机
 
     /// 服务进程输出 → 行缓冲 → 日志列表；识别就绪行。
@@ -580,7 +615,11 @@ final class ServerManager {
     /// 脱敏放在这个唯一入口而不是 `ingest`：应用自己拼的消息也可能带上 URL 或路径，
     /// 只有统一过一遍才能保证缓冲区里不存在未脱敏的行——日志会被用户整段复制出去。
     /// 落盘同样走这里，因此磁盘上的内容与界面上看到的完全一致（都已脱敏）。
-    private func log(_ line: String) {
+    /// 追加一行日志（脱敏 + 时间戳 + 落盘的唯一漏斗）。
+    ///
+    /// 非 private：`MainWindow` 关窗时要留一行「服务仍在后台」的说明，那条消息属于
+    /// 服务的生命周期叙事，应该和 dsh 自己的输出躺在同一份日志里。
+    func log(_ line: String) {
         let entry = "[\(timestampFormatter.string(from: Date()))] \(SecretMasker.mask(line))"
         logLines.append(entry)
         if logLines.count > maxLogLines {
