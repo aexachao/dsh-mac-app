@@ -1,10 +1,18 @@
 import SwiftUI
+import Combine
 
 /// 主界面：正常运行时为纯 WebView（无任何遮挡）；
 /// 仅在启动中/失败时显示状态栏；日志侧栏可在菜单中随时开关。
 struct ContentView: View {
     @State private var server = ServerManager.shared
     @State private var app = AppState.shared
+
+    /// 标题栏高度，也就是 `NSHostingView` 给内容加的 safeArea 顶部内边距。
+    /// 由窗口实测得到（见 `WindowChrome.titlebarHeight`），不写死常量。
+    @State private var titlebarHeight: CGFloat = 0
+
+    /// 拖拽条挂在窗口的 contentView 上（不在 SwiftUI 布局里），所以要留着窗口引用。
+    @State private var window: NSWindow?
 
     private var language: AppLanguage { MenuBuilder.current }
 
@@ -24,6 +32,9 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 contentArea
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // 网页顶到窗口顶部：那 32pt 原本露出的是 window.backgroundColor，
+                    // 与 dsh 的侧栏/会话区两种底色都不同，看着就是一条我们自己的导航栏。
+                    .ignoresSafeArea(.container, edges: isImmersive ? .top : [])
                 if app.showLogs {
                     Divider()
                     LogView(lines: server.logLines) {
@@ -34,12 +45,24 @@ struct ContentView: View {
         }
         .background(WindowAccessor { window in
             WindowChrome.apply(window)
+            self.window = window
+            titlebarHeight = WindowChrome.titlebarHeight(of: window)
         })
         .onAppear {
             server.start()
             app.webController.beginUserActivity()
             // 兜底：初始状态即就绪（.external/.running）时 onChange 不会触发，这里补一次
             loadIfReady()
+            syncTopBand()
+        }
+        .onChange(of: pageTopInset) { _, _ in
+            syncTopBand()
+        }
+        // 标题栏高度不是常量：进入全屏后标题栏收起，实测值变成 0，
+        // 让位和拖拽条都得跟着归零，否则页面顶部空一条、还白占一条点击。
+        .onReceive(chromeChanges) { note in
+            guard let changed = note.object as? NSWindow, changed == window else { return }
+            titlebarHeight = WindowChrome.titlebarHeight(of: changed)
         }
         .onChange(of: server.webURL) { _, url in
             guard let url else { return }
@@ -66,6 +89,38 @@ struct ContentView: View {
         case .starting, .failed: true
         case .running, .external: false
         }
+    }
+
+    /// 网页可以铺满到窗口顶部的条件：上方没有我们自己的东西。
+    /// 有状态栏或安全模式横幅时铺满，会把它们塞到红绿灯下面。
+    private var isImmersive: Bool {
+        Self.isImmersive(needsHeader: needsHeader, isSafeMode: server.isSafeMode)
+    }
+
+    static func isImmersive(needsHeader: Bool, isSafeMode: Bool) -> Bool {
+        !needsHeader && !isSafeMode
+    }
+
+    /// 网页自己该让出的高度：铺满时等于标题栏高度，否则不让。
+    private var pageTopInset: CGFloat {
+        isImmersive ? titlebarHeight : 0
+    }
+
+    /// 让位高度只有一个来源，两个消费者：网页的 `padding-top`，和红绿灯右边那条拖拽条。
+    /// 两者本来就是同一条横带，分开算迟早会对不上。
+    private func syncTopBand() {
+        app.webController.setTopInset(pageTopInset)
+        WindowChrome.setDragStripHeight(pageTopInset, on: window)
+    }
+
+    /// 可能改变标题栏实测高度的窗口事件。
+    private var chromeChanges: AnyPublisher<Notification, Never> {
+        let center = NotificationCenter.default
+        return Publishers.MergeMany(
+            center.publisher(for: NSWindow.didResizeNotification),
+            center.publisher(for: NSWindow.didEnterFullScreenNotification),
+            center.publisher(for: NSWindow.didExitFullScreenNotification)
+        ).eraseToAnyPublisher()
     }
 
     // MARK: - 顶部状态栏（仅启动中/失败时显示）
