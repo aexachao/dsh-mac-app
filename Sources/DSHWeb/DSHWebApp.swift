@@ -22,24 +22,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuBuilder.rebuild()
         MenuBuilder.startGuard() // 兜底：意外覆盖时恢复
 
-        // 主窗口（隐藏标题栏沉浸式）
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Harness"
-        window.contentView = NSHostingView(rootView: ContentView())
-        window.setFrameAutosaveName("HarnessMainWindow")
-        WindowChrome.apply(window)
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // 主窗口（隐藏标题栏沉浸式；关窗不销毁，见 MainWindow）
+        MainWindow.shared.show()
     }
 
+    /// 关掉主窗口不退出应用。
+    ///
+    /// 任务跑在 dsh 服务端，窗口只是客户端；关窗把服务一起停掉，等于把用户正在跑的活
+    /// 打断在半路（网页端关标签页就是这个下场）。关窗后应用留在 Dock 里，点 Dock 图标
+    /// 或「窗口 → 显示主窗口」回来；⌘Q 才是真退出，那条路径照旧停服务。
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    /// 点 Dock 图标：把主窗口叫回来。
+    ///
+    /// 忽略 `hasVisibleWindows`：日志面板、设置面板也是窗口，主窗口关着而日志开着时
+    /// 系统报的是 true，照它办事主窗口就再也回不来了。已经在前面时 `show()` 也只是
+    /// 把它叫回前台，正是点 Dock 图标该有的反应。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        MainWindow.shared.show()
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

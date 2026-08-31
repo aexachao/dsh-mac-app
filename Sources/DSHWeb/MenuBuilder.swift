@@ -214,10 +214,19 @@ enum MenuBuilder {
         main.addItem(windowItem)
         let windowMenu = NSMenu(title: lang == .zh ? "窗口" : "Window")
         windowItem.submenu = windowMenu
+        // 关窗只收起界面（服务照跑），所以必须给一个把它叫回来的入口 ——
+        // 除了点 Dock 图标，用户在菜单里也得找得到。
+        windowMenu.addItem(item(lang == .zh ? "显示主窗口" : "Show Main Window", symbol: "macwindow",
+                                action: #selector(MenuActions.showMainWindow),
+                                target: MenuActions.shared))
+        windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: lang == .zh ? "最小化" : "Minimize",
                            action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: lang == .zh ? "缩放" : "Zoom",
                            action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        // ⌘W 关窗不再等于退出应用，所以这条从「危险」变成了日常操作，值得摆出来
+        windowMenu.addItem(withTitle: lang == .zh ? "关闭窗口" : "Close Window",
+                           action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: lang == .zh ? "前置全部窗口" : "Bring All to Front",
                            action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
@@ -230,6 +239,12 @@ enum MenuBuilder {
 @MainActor
 final class MenuActions: NSObject {
     static let shared = MenuActions()
+
+    /// 把主窗口叫回前台（关过窗之后唯一的键盘/菜单入口）。
+    @objc func showMainWindow() {
+        MainWindow.shared.show()
+    }
+
     /// 打开独立日志窗口（正常运行时）。
     @objc func toggleLogs() {
         LogPanel.shared.toggle()
