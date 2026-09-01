@@ -51,120 +51,22 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHa
             WKUserScript(source: Self.linkBridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
         )
         configuration.userContentController.addUserScript(
-            WKUserScript(source: Self.topInsetStyleScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-        )
-        configuration.userContentController.addUserScript(
             WKUserScript(source: Self.topBandProbeScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         configuration.userContentController.add(self, name: "openExternal")
+        configuration.userContentController.add(self, name: Self.bandColorsMessageName)
         webView.navigationDelegate = self
         webView.wantsLayer = true
         webView.allowsMagnification = false
     }
 
-    // MARK: - 顶部让位（红绿灯下方那一段）
+    // MARK: - 顶部横带（红绿灯所在那一段）
 
-    /// 网页顶部给红绿灯让出的高度（点）。由 `ContentView` 按标题栏实际高度设置。
-    private(set) var topInset: CGFloat = 0
-
-    /// 让位高度写在这个 CSS 变量上，样式规则和赋值脚本共用它。
-    static let topInsetVariable = "--harness-top-inset"
-
-    /// 让位出来的那条横带，左右两段各自的颜色与分界位置。
-    ///
-    /// dsh 的界面是分栏的（侧栏一种底色、会话区另一种），而 `body` 只有一种。
-    /// 只靠 `#root` 的 padding 让位，露出来的是 `body` 的底色 —— 侧栏上方那一段
-    /// 因此比侧栏自己深一号，看着仍像我们自己的一条导航栏。这三个变量把横带
-    /// 画成「左段用侧栏的色、右段用会话区的色」，分界线由脚本实测。
-    static let topBandLeftVariable = "--harness-band-left"
-    static let topBandRightVariable = "--harness-band-right"
-    static let topBandSplitVariable = "--harness-band-split"
-
-    /// 顶部让位样式。
-    ///
-    /// 页面铺到 y=0 之后，dsh 自己的顶栏（`deepseek HARNESS` 字样）会压在红绿灯下面，
-    /// 所以由我们给它加一段 `padding-top`；那一段的填色是 `#root` 自己的
-    /// `background-image`（`background-origin` 默认就是 padding box，所以渐变正好
-    /// 从 y=0 开始，高度等于让位高度）。三个颜色变量未赋值时取 `transparent`，
-    /// 于是退化成「露出 body 底色」，也就是实测脚本没跑起来时的旧行为。
-    ///
-    /// 用 `#root` 自己的背景而不是叠一个固定定位的条：那样的条要么被 dsh 的
-    /// 弹窗盖住、要么反过来把弹窗顶部切掉，取决于双方的 z-index —— 而背景永远
-    /// 在自己的子元素下面，没有这个问题。`!important` 只加在三条
-    /// `background-*` 上，`background-color` 留给 dsh，两者本就叠在一起。
-    ///
-    /// 选 `#root`：那是 dsh 前端 `index.html` 里写死的挂载点 id，
-    /// 不是构建生成的 hash 类名，跨版本稳定。`border-box` 保证 `height:100%`
-    /// 仍是视口高度（padding 计入其中），不会多出一条滚动。
-    ///
-    /// 非 private：几个变量名在样式与赋值脚本两边各出现一次，
-    /// 由 `WebViewTopInsetTests` 钉住两处一致（改一边而漏另一边不会报编译错误，
-    /// 只是让位失效、页面重新钻到红绿灯下面）。
-    static let topInsetStyleScript = """
-    (() => {
-      const style = document.createElement('style');
-      style.id = 'harness-top-inset';
-      style.textContent = '#root{box-sizing:border-box;padding-top:var(\(topInsetVariable),0px);'
-        + 'background-image:linear-gradient(to right,'
-        + 'var(\(topBandLeftVariable),transparent) 0 var(\(topBandSplitVariable),0px),'
-        + 'var(\(topBandRightVariable),transparent) var(\(topBandSplitVariable),0px))!important;'
-        + 'background-repeat:no-repeat!important;'
-        + 'background-size:100% var(\(topInsetVariable),0px)!important}';
-      (document.head || document.documentElement).appendChild(style);
-    })();
-    """
-
-    /// 实测横带两段颜色的脚本。
-    ///
-    /// 不认任何 dsh 的选择器：从让位高度**下方**的左右两点各取一次
-    /// `elementFromPoint`，向上找到第一个背景不透明的祖先，用它的颜色和右边界。
-    /// dsh-desktop 走的是另一条路（它自己就是插件，能按 `data-slot` 精确取到侧栏），
-    /// 我们只加载官方页面，能依赖的最稳的东西就是「左上角那一栏此刻画的是什么色」——
-    /// 换了主题、折叠了侧栏、改了类名，这个测法都还成立。
-    ///
-    /// 失败方向是安全的：取不到就不赋值，横带退回单色，跟改动之前一模一样。
-    ///
-    /// 不用 MutationObserver：dsh 流式输出时整棵 DOM 每秒变几十次，
-    /// 挂一个 subtree observer 正好加重 `WebViewController` 注释里那个输入延迟问题。
-    /// 改用几个便宜的触发点：窗口尺寸变化、过渡动画结束（侧栏折叠是动画）、
-    /// 页面加载后几个延时补测，以及原生侧改让位高度时的显式调用。
-    static let topBandProbeScript = """
-    (() => {
-      const LEFT = '\(topBandLeftVariable)', RIGHT = '\(topBandRightVariable)', SPLIT = '\(topBandSplitVariable)';
-      const opaque = (color) => color && color !== 'transparent' && !/,\\s*0\\s*\\)$/.test(color);
-      const surfaceAt = (x, y) => {
-        let el = document.elementFromPoint(x, y);
-        while (el && el !== document.documentElement) {
-          const color = getComputedStyle(el).backgroundColor;
-          if (opaque(color)) return { color, right: el.getBoundingClientRect().right };
-          el = el.parentElement;
-        }
-        return null;
-      };
-      const measure = () => {
-        const root = document.getElementById('root');
-        const style = document.documentElement.style;
-        const inset = root ? parseFloat(getComputedStyle(root).paddingTop) || 0 : 0;
-        if (inset <= 0) {
-          style.removeProperty(LEFT); style.removeProperty(RIGHT); style.removeProperty(SPLIT);
-          return;
-        }
-        const y = inset + 12;
-        const left = surfaceAt(12, y);
-        const right = surfaceAt(Math.max(0, window.innerWidth - 12), y);
-        if (!left || !right) return;
-        style.setProperty(LEFT, left.color);
-        style.setProperty(RIGHT, right.color);
-        style.setProperty(SPLIT, Math.max(0, Math.round(Math.min(left.right, window.innerWidth))) + 'px');
-      };
-      window.\(measureFunctionName) = measure;
-      addEventListener('resize', measure);
-      addEventListener('transitionend', measure, true);
-      addEventListener('load', () => [0, 300, 1200].forEach((d) => setTimeout(measure, d)));
-    })();
-    """
+    /// 页面回报横带两段颜色用的消息通道名。
+    /// 注册处、脚本里的 `postMessage`、分发处三边共用，由测试钉住。
+    static let bandColorsMessageName = "topBandColors"
 
     /// 实测函数挂在 window 上的名字（脚本定义处与调用处共用）。
     static let measureFunctionName = "__harnessMeasureTopBand"
@@ -172,31 +74,103 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHa
     /// 调用实测的一行 JS（函数还没注入时静默跳过）。
     static let measureTopBandScript = "window.\(measureFunctionName) && window.\(measureFunctionName)();"
 
-    /// 生成写入让位高度的 JS。纯函数，便于把「变量名两处一致」钉在测试里。
-    static func topInsetScript(points: CGFloat) -> String {
-        let px = max(0, Int(points.rounded()))
-        return "document.documentElement.style.setProperty('\(topInsetVariable)', '\(px)px');"
+    /// 横带两段颜色变化时回调。
+    ///
+    /// 与 `onPageLoaded` 同理用回调而不是直接改窗口：横带画在 `NSWindow` 的
+    /// contentView 上，让 WebView 层拿窗口引用只会把两层缠在一起，也没法单测。
+    var onBandColors: ((TopBandColors) -> Void)?
+
+    /// 让页面重新量一次横带颜色。
+    ///
+    /// 页面自己会在尺寸变化、过渡结束、点击之后补量，这里是原生侧的显式入口：
+    /// 刚拿到窗口引用、进出全屏、导航结束这些时刻页面收不到任何事件。
+    func measureTopBand() {
+        webView.evaluateJavaScript(Self.measureTopBandScript)
     }
 
-    /// 设置让位高度；页面可能还没加载完，值存下来在 `didFinish` 里再补一次。
-    func setTopInset(_ points: CGFloat) {
-        topInset = points
-        applyTopInset()
-    }
+    /// 实测横带两段颜色的脚本。
+    ///
+    /// 不认任何 dsh 的选择器：从页面左右两点各取一次 `elementFromPoint`，
+    /// 向上找到第一个背景不透明的祖先，用它的颜色和右边界。
+    /// dsh-desktop 走的是另一条路（它自己就是插件，能按 `data-slot` 精确取到侧栏），
+    /// 我们只加载官方页面，能依赖的最稳的东西就是「左上角那一栏此刻画的是什么色」——
+    /// 换了主题、折叠了侧栏、改了类名，这个测法都还成立。
+    ///
+    /// 失败方向是安全的：取不到就什么都不报，横带留在窗口底色上，
+    /// 跟没有这条横带之前一模一样。
+    ///
+    /// 不用 MutationObserver：dsh 流式输出时整棵 DOM 每秒变几十次，
+    /// 挂一个 subtree observer 正好加重 `WebViewController` 注释里那个输入延迟问题。
+    /// 改用几个便宜的触发点：窗口尺寸变化、过渡动画结束（侧栏折叠是动画）、
+    /// 点击，页面加载后几个延时补测，以及原生侧的显式调用（`measureTopBand`）。
+    static let topBandProbeScript = """
+    (() => {
+      // 取色点固定在 y=44：页面整体在标题栏下方，44 已经落在 dsh 自己的界面里，
+      // 又浅得不会撞上居中的弹窗
+      const Y = 44;
+      const canvas = document.createElement('canvas');
+      canvas.width = 1; canvas.height = 1;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      // 颜色归一化交给浏览器：画一个像素再读回来，rgb()／rgba()／color(srgb …)／
+      // oklch(…) 全都变成 sRGB 字节。在 Swift 里追 WebKit 的序列化格式迟早漏一种，
+      // 漏掉的那一种就是一条颜色不对的横带。alpha 不足按「没量到」处理，继续往上找
+      const solid = (color) => {
+        if (!ctx || !color || color === 'transparent') return null;
+        ctx.clearRect(0, 0, 1, 1);
+        ctx.fillStyle = color;
+        ctx.fillRect(0, 0, 1, 1);
+        const d = ctx.getImageData(0, 0, 1, 1).data;
+        return d[3] < 250 ? null : [d[0], d[1], d[2]];
+      };
+      const surfaceAt = (x, y) => {
+        let el = document.elementFromPoint(x, y);
+        while (el && el !== document.documentElement) {
+          const color = solid(getComputedStyle(el).backgroundColor);
+          if (color) return { color, right: el.getBoundingClientRect().right };
+          el = el.parentElement;
+        }
+        return null;
+      };
+      const measure = () => {
+        const width = Math.round(window.innerWidth);
+        if (width <= 0) return;
+        const left = surfaceAt(12, Y);
+        const right = surfaceAt(Math.max(0, width - 12), Y);
+        if (!left || !right) return;
+        const handlers = window.webkit && window.webkit.messageHandlers;
+        const sink = handlers && handlers.\(bandColorsMessageName);
+        if (!sink) return;
+        sink.postMessage({
+          left: left.color,
+          right: right.color,
+          split: Math.max(0, Math.min(Math.round(left.right), width))
+        });
+      };
+      window.\(measureFunctionName) = measure;
+      addEventListener('resize', measure);
+      addEventListener('transitionend', measure, true);
+      addEventListener('click', measure, true);
+      addEventListener('load', () => [0, 300, 1200].forEach((d) => setTimeout(measure, d)));
+    })();
+    """
 
-    private func applyTopInset() {
-        // 顺序不能反：横带的高度取自 `#root` 的 padding，先写让位高度，再去实测
-        webView.evaluateJavaScript(Self.topInsetScript(points: topInset) + Self.measureTopBandScript)
-    }
-
-    // MARK: - WKScriptMessageHandler（注入脚本 → 外链打开）
+    // MARK: - WKScriptMessageHandler（注入脚本 → 外链打开 / 横带颜色回报）
 
     func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        guard message.name == "openExternal",
-              let urlString = message.body as? String,
+        switch message.name {
+        case "openExternal": openExternal(message.body)
+        case Self.bandColorsMessageName:
+            // 解析失败就什么都不做：横带留在窗口底色上，而不是照一个乱数画色
+            if let colors = TopBandColors.parse(message.body) { onBandColors?(colors) }
+        default: break
+        }
+    }
+
+    private func openExternal(_ body: Any) {
+        guard let urlString = body as? String,
               let url = URL(string: urlString),
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else { return }
@@ -272,8 +246,8 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHa
 
     /// 页面加载完成 —— 健康判定的两个必要条件之一（另一个是最短存活时长）。
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // 让位高度写在 documentElement 的 inline style 上，导航会把它清掉，每次加载后补回来
-        applyTopInset()
+        // 导航会把上一份页面连同它的监听一起丢掉，加载完成后重新量一次横带颜色
+        measureTopBand()
         onPageLoaded?()
     }
 }

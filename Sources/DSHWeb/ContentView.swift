@@ -30,11 +30,13 @@ struct ContentView: View {
                 Divider()
             }
             HStack(spacing: 0) {
+                // 网页整体留在标题栏**下方**（不加 `ignoresSafeArea`）：红绿灯那条横带里
+                // 于是不可能有任何页面内容，拖拽条整条通吃鼠标事件也就不会抢走页面的点击。
+                // 此前网页铺到 y=0、靠 `#root` 的 padding-top 让位，推得动的只有 `#root`
+                // 的子元素，而 dsh 右上角那两个图标是 `position: fixed`（相对视口定位），
+                // padding 根本推不动它们 —— 它们留在横带里，点击被拖拽条吃掉。
                 contentArea
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    // 网页顶到窗口顶部：那 32pt 原本露出的是 window.backgroundColor，
-                    // 与 dsh 的侧栏/会话区两种底色都不同，看着就是一条我们自己的导航栏。
-                    .ignoresSafeArea(.container, edges: isImmersive ? .top : [])
                 if app.showLogs {
                     Divider()
                     LogView(lines: server.logLines) {
@@ -55,11 +57,18 @@ struct ContentView: View {
             loadIfReady()
             syncTopBand()
         }
-        .onChange(of: pageTopInset) { _, _ in
+        .onChange(of: titlebarHeight) { _, _ in
+            syncTopBand()
+        }
+        .onChange(of: isImmersive) { _, _ in
+            syncTopBand()
+        }
+        // 页面实测到的两段颜色（换主题、折叠侧栏都会变）
+        .onChange(of: app.topBand) { _, _ in
             syncTopBand()
         }
         // 标题栏高度不是常量：进入全屏后标题栏收起，实测值变成 0，
-        // 让位和拖拽条都得跟着归零，否则页面顶部空一条、还白占一条点击。
+        // 横带与拖拽条都得跟着归零，否则窗口顶上多出一条画错色的横带。
         .onReceive(chromeChanges) { note in
             guard let changed = note.object as? NSWindow, changed == window else { return }
             titlebarHeight = WindowChrome.titlebarHeight(of: changed)
@@ -92,7 +101,7 @@ struct ContentView: View {
     }
 
     /// 网页可以铺满到窗口顶部的条件：上方没有我们自己的东西。
-    /// 有状态栏或安全模式横幅时铺满，会把它们塞到红绿灯下面。
+    /// 有状态栏或安全模式横幅时，横带上方那一段不再是网页，实测的颜色也就不该画上去。
     private var isImmersive: Bool {
         Self.isImmersive(needsHeader: needsHeader, isSafeMode: server.isSafeMode)
     }
@@ -101,16 +110,15 @@ struct ContentView: View {
         !needsHeader && !isSafeMode
     }
 
-    /// 网页自己该让出的高度：铺满时等于标题栏高度，否则不让。
-    private var pageTopInset: CGFloat {
-        isImmersive ? titlebarHeight : 0
-    }
-
-    /// 让位高度只有一个来源，两个消费者：网页的 `padding-top`，和红绿灯右边那条拖拽条。
-    /// 两者本来就是同一条横带，分开算迟早会对不上。
+    /// 横带的高度与颜色只有这一个出口。
+    ///
+    /// 高度始终等于标题栏实测高度 —— 拖拽条得一直在，不然红绿灯右边那段窗口拖不动；
+    /// 颜色只在网页确实顶在最上面时才画，否则横带露出窗口底色（跟加这条横带之前一样）。
     private func syncTopBand() {
-        app.webController.setTopInset(pageTopInset)
-        WindowChrome.setDragStripHeight(pageTopInset, on: window)
+        WindowChrome.setBandHeight(titlebarHeight, on: window)
+        WindowChrome.setBandColors(isImmersive ? app.topBand : nil, on: window)
+        // 拿到窗口引用、或高度变化之后让页面补量一次：这些时刻页面自己收不到任何事件
+        app.webController.measureTopBand()
     }
 
     /// 可能改变标题栏实测高度的窗口事件。
