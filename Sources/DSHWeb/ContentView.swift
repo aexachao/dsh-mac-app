@@ -63,9 +63,12 @@ struct ContentView: View {
         .onChange(of: isImmersive) { _, _ in
             syncTopBand()
         }
-        // 页面实测到的两段颜色（换主题、折叠侧栏都会变）
+        // 页面实测到的两段颜色（换主题、折叠侧栏都会变）。
+        // 这里**只上色、不回头再让页面量一次**：侧栏折叠期间每一帧的分界都不同，
+        // 「量到 → 上色 → 再量」会自己首尾相接转起来，正好压在动画那几帧上。
+        // 页面自己有触发点，原生只在页面收不到事件的时刻（下面几处）显式补量。
         .onChange(of: app.topBand) { _, _ in
-            syncTopBand()
+            paintTopBand()
         }
         // 标题栏高度不是常量：进入全屏后标题栏收起，实测值变成 0，
         // 横带与拖拽条都得跟着归零，否则窗口顶上多出一条画错色的横带。
@@ -114,10 +117,17 @@ struct ContentView: View {
     ///
     /// 高度始终等于标题栏实测高度 —— 拖拽条得一直在，不然红绿灯右边那段窗口拖不动；
     /// 颜色只在网页确实顶在最上面时才画，否则横带露出窗口底色（跟加这条横带之前一样）。
-    private func syncTopBand() {
+    private func paintTopBand() {
         WindowChrome.setBandHeight(titlebarHeight, on: window)
         WindowChrome.setBandColors(isImmersive ? app.topBand : nil, on: window)
-        // 拿到窗口引用、或高度变化之后让页面补量一次：这些时刻页面自己收不到任何事件
+    }
+
+    /// 上色，并让页面补量一次。
+    ///
+    /// 只用在页面自己收不到任何事件的时刻：刚拿到窗口引用、标题栏高度变了（进出全屏）、
+    /// 沉浸态变了。颜色回报本身不走这里，见上面 `app.topBand` 的注释。
+    private func syncTopBand() {
+        paintTopBand()
         app.webController.measureTopBand()
     }
 

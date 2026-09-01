@@ -58,6 +58,30 @@ struct TopBandTests {
         #expect(js.contains("data-slot") == false)
     }
 
+    @Test func eventsOnlyScheduleAMeasurePerFrame() {
+        let js = WebViewController.topBandProbeScript
+        // 用户实测「侧栏展开／收起卡顿」的根因：`transitionend` 会冒泡，监听挂在
+        // window 捕获阶段，一次折叠动的是整棵子树、每元素每属性各发一次事件，
+        // 而 measure() 里两次 elementFromPoint、逐级 getComputedStyle、
+        // getBoundingClientRect 全是强制同步布局。合并到一帧一次是唯一出路
+        #expect(js.contains("requestAnimationFrame"))
+        for event in ["resize", "transitionend", "click"] {
+            #expect(js.contains("addEventListener('\(event)', schedule"))
+            // 事件不能再直连 measure，否则这一道闸等于没有
+            #expect(js.contains("addEventListener('\(event)', measure") == false)
+        }
+    }
+
+    @Test func colourNormalisationIsCached() {
+        let js = WebViewController.topBandProbeScript
+        // getImageData 是 GPU→CPU 回读。页面上真出现过的颜色只有两三种，
+        // 同一个字符串重复回读就是白扛动画那几帧
+        #expect(js.contains("cache.has(color)"))
+        #expect(js.contains("cache.set(color"))
+        // 上限防呆：背景色过渡的中间态会造出一大批一次性字符串
+        #expect(js.contains("cache.clear()"))
+    }
+
     @Test func probeGivesUpSilentlyWhenEitherSideIsUnmeasurable() {
         let js = WebViewController.topBandProbeScript
         // 少一边就什么都不报：横带留在窗口底色上，跟加这条横带之前一模一样，

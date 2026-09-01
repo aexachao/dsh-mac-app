@@ -103,6 +103,22 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHa
     /// 挂一个 subtree observer 正好加重 `WebViewController` 注释里那个输入延迟问题。
     /// 改用几个便宜的触发点：窗口尺寸变化、过渡动画结束（侧栏折叠是动画）、
     /// 点击，页面加载后几个延时补测，以及原生侧的显式调用（`measureTopBand`）。
+    ///
+    /// 但「便宜的触发点」这句话对 `transitionend` 不成立，而这一点是实测出来的：
+    /// 用户报「侧栏展开／收起的动画卡顿」。`transitionend` 会冒泡，监听又挂在
+    /// window 的捕获阶段 —— 侧栏折叠动的是一整棵子树、每个元素每条属性各发一次，
+    /// 一次折叠就是几十到上百个事件，每个都同步跑一遍 `measure()`：两次
+    /// `elementFromPoint`、逐级 `getComputedStyle`、`getBoundingClientRect`
+    /// 都会强制同步布局，`getImageData` 还是一次 GPU→CPU 回读。动画本身正等着
+    /// 那几帧，这些活全插在中间。所以有两道闸：
+    ///
+    /// 1. **事件只排期、不直接量**（`schedule`）：一帧内来多少事件都合并成一次
+    ///    `requestAnimationFrame` 回调，量的次数从「事件数」降到「帧数」。
+    /// 2. **颜色归一化带缓存**：同一个颜色字符串只回读一次画布。实际只有两三种
+    ///    颜色，于是动画期间 `getImageData` 一次都不再发生。
+    ///
+    /// 原生侧的显式入口仍然立即量：那几个时刻（拿到窗口、进出全屏、导航结束）
+    /// 页面收不到任何事件，晚一帧就是横带晚一帧上色。
     static let topBandProbeScript = """
     (() => {
       // 取色点固定在 y=44：页面整体在标题栏下方，44 已经落在 dsh 自己的界面里，
@@ -114,13 +130,22 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHa
       // 颜色归一化交给浏览器：画一个像素再读回来，rgb()／rgba()／color(srgb …)／
       // oklch(…) 全都变成 sRGB 字节。在 Swift 里追 WebKit 的序列化格式迟早漏一种，
       // 漏掉的那一种就是一条颜色不对的横带。alpha 不足按「没量到」处理，继续往上找
+      //
+      // 结果按颜色字符串缓存：`getImageData` 是 GPU→CPU 回读，而页面上真正出现过的
+      // 颜色只有两三种，动画期间一次都不该再回读。上限只是防呆 —— 万一某个元素
+      // 正在做背景色过渡，中间态会造出一大批一次性字符串
+      const cache = new Map();
       const solid = (color) => {
         if (!ctx || !color || color === 'transparent') return null;
+        if (cache.has(color)) return cache.get(color);
         ctx.clearRect(0, 0, 1, 1);
         ctx.fillStyle = color;
         ctx.fillRect(0, 0, 1, 1);
         const d = ctx.getImageData(0, 0, 1, 1).data;
-        return d[3] < 250 ? null : [d[0], d[1], d[2]];
+        const rgb = d[3] < 250 ? null : [d[0], d[1], d[2]];
+        if (cache.size >= 64) cache.clear();
+        cache.set(color, rgb);
+        return rgb;
       };
       const surfaceAt = (x, y) => {
         let el = document.elementFromPoint(x, y);
@@ -147,9 +172,16 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHa
         });
       };
       window.\(measureFunctionName) = measure;
-      addEventListener('resize', measure);
-      addEventListener('transitionend', measure, true);
-      addEventListener('click', measure, true);
+      // 事件一律只排期：一帧内来一百个 transitionend 也只量一次
+      let scheduled = false;
+      const schedule = () => {
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(() => { scheduled = false; measure(); });
+      };
+      addEventListener('resize', schedule);
+      addEventListener('transitionend', schedule, true);
+      addEventListener('click', schedule, true);
       addEventListener('load', () => [0, 300, 1200].forEach((d) => setTimeout(measure, d)));
     })();
     """
