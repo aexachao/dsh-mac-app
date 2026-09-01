@@ -6,12 +6,13 @@
   <img src="./assets/readme/harness-main.png" width="100%" alt="Harness 应用运行界面：深色 DeepSeek Harness 会话工作台">
 </p>
 
-**Harness** 把 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（dsh）的 Web 工作台包装成原生 macOS 应用。打开应用就是打开工作台，退出应用服务随之停止 —— Node.js 与 dsh 已捆绑在包里，下载即用。
+**Harness** 把 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（dsh）的 Web 工作台包装成原生 macOS 应用。打开应用就是打开工作台，⌘Q 退出时服务随之停止 —— Node.js 与 dsh 已捆绑在包里，下载即用。
 
 | 动作 | 发生的事 |
 |---|---|
 | **打开应用** | 挑一个可用端口、启动 dsh 服务、加载工作台（约 2 秒出界面） |
-| **退出应用** | 服务连插件派生的子孙进程一并终止，不留残留、不占端口 |
+| **关闭窗口**（⌘W） | 只收起界面。应用留在 Dock 里、服务继续跑，任务不会被打断；点 Dock 图标或「窗口 → 显示主窗口」回来，回来时还是关掉时那一页 |
+| **退出应用**（⌘Q） | 服务连插件派生的子孙进程一并终止，不留残留、不占端口 |
 
 在浏览器里用 dsh 要自己记着「先 `dsh web`，再开页面，用完杀进程」。这两行就是 Harness 做的全部事情，剩下的篇幅都在讲它出错时怎么办。
 
@@ -64,6 +65,8 @@
 
 **为什么只发 dmg。** zip 解压出来的应用仍带隔离标记，原地双击就会触发上面说的 App Translocation。dmg 里放一个指向「应用程序」的符号链接，用户先拖过去再打开，这一类问题从源头消失。dmg 本身也单独签名、公证、装订 —— 应用里的票据不解除容器的隔离标记。
 
+**为什么关窗不等于退出。** agent 的任务跑在 dsh 服务端，窗口只是它的客户端。关窗顺手把服务停掉，正在跑的任务就断在半路 —— 那正是网页端关掉标签页的下场，也正是原生外壳该避免的。所以关窗只收起界面，⌘Q 才真退出。
+
 **为什么退出要收整棵进程树。** 只终止那个直接子进程（node）的话，dsh 插件自己 spawn 的常驻进程（实测 dsh-doctor 的 supervisor 连 SIGTERM 都不理）会在 node 死后被 launchd 收养，活过应用退出，继续占着端口和应用所在的挂载点。所以退出前先抓下整棵子孙树再动手 —— 父进程一退出，子孙的 PPID 全变成 1，那棵树就再也认不出来了。
 
 ## 开发
@@ -83,7 +86,7 @@ swift test                        # 单元测试
 | 服务与运行时 | `ServerManager` `ServerArguments` `RuntimeLocator` `PortStrategy` `DSHProcessIdentity` `ProcessTree` |
 | 失败与恢复 | `FailureCause` `StartupHealth` `SafeMode` `PluginInventory` |
 | 日志与诊断 | `SecretMasker` `LogFileSink` `LogRotation` `DiagnosticsReport` `MenuStateLog` |
-| 界面与外壳 | `main` `DSHWebApp` `ContentView` `AppState` `WebViewController` `WindowAccessor` `LogPanel` `SettingsView` `MenuBuilder` `Strings` `InstanceLock` `AppRelaunch` `AppDirectories` |
+| 界面与外壳 | `main` `DSHWebApp` `MainWindow` `ContentView` `AppState` `WebViewController` `WindowAccessor` `LogPanel` `SettingsView` `MenuBuilder` `Strings` `InstanceLock` `AppRelaunch` `AppDirectories` |
 | `scripts/` | `build.sh` `vendor-runtime.sh` `notarize.sh` `make-dmg.sh` `import-signing-cert.sh` `check-upstream.sh` |
 
 </details>
