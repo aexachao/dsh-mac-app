@@ -2,7 +2,7 @@ import AppKit
 import Testing
 @testable import DSHWeb
 
-/// 红绿灯右边那条透明拖拽条，以及它下面那条横带底色。
+/// 红绿灯右边那条透明拖拽条。
 ///
 /// 这一层踩过两次坑，都不在编译期暴露：
 /// 1. 上一版把条子做成 SwiftUI 的 `.overlay(alignment: .top)`。`ignoresSafeArea` 只让内容
@@ -14,12 +14,12 @@ import Testing
 ///    （相对视口定位）纹丝不动地留在横带里，点击被条子吃掉。
 ///
 /// 现在网页整体在标题栏下方，横带里不可能有页面内容，所以这里钉的是：条子在窗口顶部、
-/// 整条都命中它、横带以下一点也不碰，以及底色那层永不参与命中测试。
+/// 整条都命中它、横带以下一点也不碰，以及高度归零时它彻底让开。
 @MainActor
 struct TitlebarDragStripTests {
 
     /// 构造一份与主窗口同款的容器（同一个 styleMask，含 fullSizeContentView）。
-    private func makeWindow(bandHeight: CGFloat) -> (ContentContainerView, NSView) {
+    private func makeWindow(stripHeight: CGFloat) -> (ContentContainerView, NSView) {
         let content = NSView(frame: .zero)
         let container = ContentContainerView(content: content)
         let window = NSWindow(
@@ -29,7 +29,7 @@ struct TitlebarDragStripTests {
             defer: false
         )
         window.contentView = container
-        container.bandHeight = bandHeight
+        container.stripHeight = stripHeight
         container.layoutSubtreeIfNeeded()
         return (container, content)
     }
@@ -38,65 +38,43 @@ struct TitlebarDragStripTests {
         container.subviews.compactMap { $0 as? TitlebarDragStrip }.first
     }
 
-    private func band(in container: ContentContainerView) -> TopBandView? {
-        container.subviews.compactMap { $0 as? TopBandView }.first
-    }
-
     /// `point` 用容器自己的坐标（左下原点）；`hitTest` 要的是父视图坐标。
     private func hitTest(_ container: ContentContainerView, at point: NSPoint) -> NSView? {
         container.hitTest(container.convert(point, to: container.superview))
     }
 
     @Test func stripCoversTheTopBandOfTheWindow() throws {
-        let (container, _) = makeWindow(bandHeight: 32)
+        let (container, _) = makeWindow(stripHeight: 32)
         let frame = try #require(strip(in: container)).frame
         // 顶边贴住容器顶边（contentView 在 fullSizeContentView 下覆盖整个窗口），
-        // 高度就是横带高度，宽度铺满 —— 三者任一错位都表现为「某处拖不动」
+        // 高度就是标题栏实测高度，宽度铺满 —— 三者任一错位都表现为「某处拖不动」
         #expect(frame.maxY == container.bounds.maxY)
         #expect(frame.height == 32)
         #expect(frame.width == container.bounds.width)
         #expect(frame.minX == container.bounds.minX)
     }
 
-    @Test func bandSharesTheStripRect() throws {
-        // 底色与拖拽条本来就是同一条横带，几何分开算迟早对不上：
-        // 差一点就是横带边缘露出一线窗口底色
-        let (container, _) = makeWindow(bandHeight: 32)
-        let stripFrame = try #require(strip(in: container)).frame
-        let bandFrame = try #require(band(in: container)).frame
-        #expect(bandFrame == stripFrame)
-    }
-
     @Test func stripWinsHitTestingAcrossTheWholeBand() {
         // 横带里没有任何页面内容，整条归拖拽条 —— 包括最左、最右两端
-        let (container, _) = makeWindow(bandHeight: 32)
+        let (container, _) = makeWindow(stripHeight: 32)
         let y = container.bounds.maxY - 5
         for x in [CGFloat(1), 100, 400, 799] {
             #expect(hitTest(container, at: NSPoint(x: x, y: y)) is TitlebarDragStrip)
         }
     }
 
-    @Test func bandColorLayerNeverTakesClicks() {
-        // 底色那层在拖拽条**下面**，万一条子被隐藏，命中也不能停在底色上
-        let (container, content) = makeWindow(bandHeight: 32)
-        strip(in: container)?.isHidden = true
-        let hit = hitTest(container, at: NSPoint(x: 100, y: container.bounds.maxY - 5))
-        #expect(hit === content)
-    }
-
     @Test func stripDoesNotStealClicksBelowTheBand() {
-        let (container, content) = makeWindow(bandHeight: 32)
+        let (container, content) = makeWindow(stripHeight: 32)
         // 条子只该盖住横带那一段。多盖一点，页面顶部就被横向抢掉一条点击。
         let hit = hitTest(container, at: NSPoint(x: 100, y: container.bounds.maxY - 40))
         #expect(hit === content)
     }
 
     @Test func zeroHeightGivesTheBandBackToThePage() {
-        // 进入全屏后标题栏收起、实测高度为 0：横带与条子都必须彻底让开
+        // 进入全屏后标题栏收起、实测高度为 0：条子必须彻底让开
         //（isHidden 的视图不参与命中测试）
-        let (container, content) = makeWindow(bandHeight: 0)
+        let (container, content) = makeWindow(stripHeight: 0)
         #expect(strip(in: container)?.isHidden == true)
-        #expect(band(in: container)?.isHidden == true)
         let hit = hitTest(container, at: NSPoint(x: 100, y: container.bounds.maxY - 1))
         #expect(hit === content)
     }
@@ -104,27 +82,23 @@ struct TitlebarDragStripTests {
     @Test func contentFillsTheContainer() {
         // 让位由 `NSHostingView` 的 safeArea 做（网页整体在标题栏下方），
         // 原生这层不缩内容 —— 缩了顶部会露出窗口底色
-        let (container, content) = makeWindow(bandHeight: 32)
+        let (container, content) = makeWindow(stripHeight: 32)
         #expect(content.frame == container.bounds)
     }
 
     @Test func stripTakesTheFirstClickOnAnInactiveWindow() {
         // 真标题栏在窗口不在前台时也能「一下就拖起来」；默认行为是第一次点击只激活窗口
-        let (container, _) = makeWindow(bandHeight: 32)
+        let (container, _) = makeWindow(stripHeight: 32)
         #expect(strip(in: container)?.acceptsFirstMouse(for: nil) == true)
     }
 
-    @Test func bandColorsReachTheBandView() {
-        // 颜色从 `WindowChrome.setBandColors` 一路到底色视图；断在中途就是一条不上色的横带
-        let (container, _) = makeWindow(bandHeight: 32)
-        let colors = TopBandColors(
-            left: .init(red: 1, green: 2, blue: 3),
-            right: .init(red: 4, green: 5, blue: 6),
-            split: 200
-        )
-        WindowChrome.setBandColors(colors, on: container.window)
-        #expect(band(in: container)?.colors == colors)
-        WindowChrome.setBandColors(nil, on: container.window)
-        #expect(band(in: container)?.colors == nil)
+    @Test func heightReachesTheStripThroughWindowChrome() throws {
+        // 高度从 `WindowChrome.setDragStripHeight` 一路到条子；断在中途就是窗口拖不动
+        let (container, _) = makeWindow(stripHeight: 0)
+        WindowChrome.setDragStripHeight(32, on: container.window)
+        container.layoutSubtreeIfNeeded()
+        #expect(try #require(strip(in: container)).frame.height == 32)
+        WindowChrome.setDragStripHeight(0, on: container.window)
+        #expect(strip(in: container)?.isHidden == true)
     }
 }

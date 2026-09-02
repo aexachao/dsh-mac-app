@@ -55,23 +55,13 @@ struct ContentView: View {
             app.webController.beginUserActivity()
             // 兜底：初始状态即就绪（.external/.running）时 onChange 不会触发，这里补一次
             loadIfReady()
-            syncTopBand()
+            syncDragStrip()
         }
         .onChange(of: titlebarHeight) { _, _ in
-            syncTopBand()
-        }
-        .onChange(of: isImmersive) { _, _ in
-            syncTopBand()
-        }
-        // 页面实测到的两段颜色（换主题、折叠侧栏都会变）。
-        // 这里**只上色、不回头再让页面量一次**：侧栏折叠期间每一帧的分界都不同，
-        // 「量到 → 上色 → 再量」会自己首尾相接转起来，正好压在动画那几帧上。
-        // 页面自己有触发点，原生只在页面收不到事件的时刻（下面几处）显式补量。
-        .onChange(of: app.topBand) { _, _ in
-            paintTopBand()
+            syncDragStrip()
         }
         // 标题栏高度不是常量：进入全屏后标题栏收起，实测值变成 0，
-        // 横带与拖拽条都得跟着归零，否则窗口顶上多出一条画错色的横带。
+        // 拖拽条也得跟着归零，否则窗口顶部多出一条什么都不画、却吃掉页面点击的条子。
         .onReceive(chromeChanges) { note in
             guard let changed = note.object as? NSWindow, changed == window else { return }
             titlebarHeight = WindowChrome.titlebarHeight(of: changed)
@@ -103,32 +93,12 @@ struct ContentView: View {
         }
     }
 
-    /// 网页可以铺满到窗口顶部的条件：上方没有我们自己的东西。
-    /// 有状态栏或安全模式横幅时，横带上方那一段不再是网页，实测的颜色也就不该画上去。
-    private var isImmersive: Bool {
-        Self.isImmersive(needsHeader: needsHeader, isSafeMode: server.isSafeMode)
-    }
-
-    static func isImmersive(needsHeader: Bool, isSafeMode: Bool) -> Bool {
-        !needsHeader && !isSafeMode
-    }
-
-    /// 横带的高度与颜色只有这一个出口。
+    /// 拖拽条高度只有这一个出口：始终等于标题栏实测高度。
     ///
-    /// 高度始终等于标题栏实测高度 —— 拖拽条得一直在，不然红绿灯右边那段窗口拖不动；
-    /// 颜色只在网页确实顶在最上面时才画，否则横带露出窗口底色（跟加这条横带之前一样）。
-    private func paintTopBand() {
-        WindowChrome.setBandHeight(titlebarHeight, on: window)
-        WindowChrome.setBandColors(isImmersive ? app.topBand : nil, on: window)
-    }
-
-    /// 上色，并让页面补量一次。
-    ///
-    /// 只用在页面自己收不到任何事件的时刻：刚拿到窗口引用、标题栏高度变了（进出全屏）、
-    /// 沉浸态变了。颜色回报本身不走这里，见上面 `app.topBand` 的注释。
-    private func syncTopBand() {
-        paintTopBand()
-        app.webController.measureTopBand()
+    /// 条子必须一直在 —— 红绿灯右边那段不属于标题栏，没有它窗口就只剩边框能拖。
+    /// 进入全屏后实测高度为 0，条子随之让开。
+    private func syncDragStrip() {
+        WindowChrome.setDragStripHeight(titlebarHeight, on: window)
     }
 
     /// 可能改变标题栏实测高度的窗口事件。

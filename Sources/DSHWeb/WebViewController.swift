@@ -50,155 +50,22 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHa
         configuration.userContentController.addUserScript(
             WKUserScript(source: Self.linkBridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
         )
-        configuration.userContentController.addUserScript(
-            WKUserScript(source: Self.topBandProbeScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-        )
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         configuration.userContentController.add(self, name: "openExternal")
-        configuration.userContentController.add(self, name: Self.bandColorsMessageName)
         webView.navigationDelegate = self
         webView.wantsLayer = true
         webView.allowsMagnification = false
     }
 
-    // MARK: - 顶部横带（红绿灯所在那一段）
-
-    /// 页面回报横带两段颜色用的消息通道名。
-    /// 注册处、脚本里的 `postMessage`、分发处三边共用，由测试钉住。
-    static let bandColorsMessageName = "topBandColors"
-
-    /// 实测函数挂在 window 上的名字（脚本定义处与调用处共用）。
-    static let measureFunctionName = "__harnessMeasureTopBand"
-
-    /// 调用实测的一行 JS（函数还没注入时静默跳过）。
-    static let measureTopBandScript = "window.\(measureFunctionName) && window.\(measureFunctionName)();"
-
-    /// 横带两段颜色变化时回调。
-    ///
-    /// 与 `onPageLoaded` 同理用回调而不是直接改窗口：横带画在 `NSWindow` 的
-    /// contentView 上，让 WebView 层拿窗口引用只会把两层缠在一起，也没法单测。
-    var onBandColors: ((TopBandColors) -> Void)?
-
-    /// 让页面重新量一次横带颜色。
-    ///
-    /// 页面自己会在尺寸变化、过渡结束、点击之后补量，这里是原生侧的显式入口：
-    /// 刚拿到窗口引用、进出全屏、导航结束这些时刻页面收不到任何事件。
-    func measureTopBand() {
-        webView.evaluateJavaScript(Self.measureTopBandScript)
-    }
-
-    /// 实测横带两段颜色的脚本。
-    ///
-    /// 不认任何 dsh 的选择器：从页面左右两点各取一次 `elementFromPoint`，
-    /// 向上找到第一个背景不透明的祖先，用它的颜色和右边界。
-    /// dsh-desktop 走的是另一条路（它自己就是插件，能按 `data-slot` 精确取到侧栏），
-    /// 我们只加载官方页面，能依赖的最稳的东西就是「左上角那一栏此刻画的是什么色」——
-    /// 换了主题、折叠了侧栏、改了类名，这个测法都还成立。
-    ///
-    /// 失败方向是安全的：取不到就什么都不报，横带留在窗口底色上，
-    /// 跟没有这条横带之前一模一样。
-    ///
-    /// 不用 MutationObserver：dsh 流式输出时整棵 DOM 每秒变几十次，
-    /// 挂一个 subtree observer 正好加重 `WebViewController` 注释里那个输入延迟问题。
-    /// 改用几个便宜的触发点：窗口尺寸变化、过渡动画结束（侧栏折叠是动画）、
-    /// 点击，页面加载后几个延时补测，以及原生侧的显式调用（`measureTopBand`）。
-    ///
-    /// 但「便宜的触发点」这句话对 `transitionend` 不成立，而这一点是实测出来的：
-    /// 用户报「侧栏展开／收起的动画卡顿」。`transitionend` 会冒泡，监听又挂在
-    /// window 的捕获阶段 —— 侧栏折叠动的是一整棵子树、每个元素每条属性各发一次，
-    /// 一次折叠就是几十到上百个事件，每个都同步跑一遍 `measure()`：两次
-    /// `elementFromPoint`、逐级 `getComputedStyle`、`getBoundingClientRect`
-    /// 都会强制同步布局，`getImageData` 还是一次 GPU→CPU 回读。动画本身正等着
-    /// 那几帧，这些活全插在中间。所以有两道闸：
-    ///
-    /// 1. **事件只排期、不直接量**（`schedule`）：一帧内来多少事件都合并成一次
-    ///    `requestAnimationFrame` 回调，量的次数从「事件数」降到「帧数」。
-    /// 2. **颜色归一化带缓存**：同一个颜色字符串只回读一次画布。实际只有两三种
-    ///    颜色，于是动画期间 `getImageData` 一次都不再发生。
-    ///
-    /// 原生侧的显式入口仍然立即量：那几个时刻（拿到窗口、进出全屏、导航结束）
-    /// 页面收不到任何事件，晚一帧就是横带晚一帧上色。
-    static let topBandProbeScript = """
-    (() => {
-      // 取色点固定在 y=44：页面整体在标题栏下方，44 已经落在 dsh 自己的界面里，
-      // 又浅得不会撞上居中的弹窗
-      const Y = 44;
-      const canvas = document.createElement('canvas');
-      canvas.width = 1; canvas.height = 1;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      // 颜色归一化交给浏览器：画一个像素再读回来，rgb()／rgba()／color(srgb …)／
-      // oklch(…) 全都变成 sRGB 字节。在 Swift 里追 WebKit 的序列化格式迟早漏一种，
-      // 漏掉的那一种就是一条颜色不对的横带。alpha 不足按「没量到」处理，继续往上找
-      //
-      // 结果按颜色字符串缓存：`getImageData` 是 GPU→CPU 回读，而页面上真正出现过的
-      // 颜色只有两三种，动画期间一次都不该再回读。上限只是防呆 —— 万一某个元素
-      // 正在做背景色过渡，中间态会造出一大批一次性字符串
-      const cache = new Map();
-      const solid = (color) => {
-        if (!ctx || !color || color === 'transparent') return null;
-        if (cache.has(color)) return cache.get(color);
-        ctx.clearRect(0, 0, 1, 1);
-        ctx.fillStyle = color;
-        ctx.fillRect(0, 0, 1, 1);
-        const d = ctx.getImageData(0, 0, 1, 1).data;
-        const rgb = d[3] < 250 ? null : [d[0], d[1], d[2]];
-        if (cache.size >= 64) cache.clear();
-        cache.set(color, rgb);
-        return rgb;
-      };
-      const surfaceAt = (x, y) => {
-        let el = document.elementFromPoint(x, y);
-        while (el && el !== document.documentElement) {
-          const color = solid(getComputedStyle(el).backgroundColor);
-          if (color) return { color, right: el.getBoundingClientRect().right };
-          el = el.parentElement;
-        }
-        return null;
-      };
-      const measure = () => {
-        const width = Math.round(window.innerWidth);
-        if (width <= 0) return;
-        const left = surfaceAt(12, Y);
-        const right = surfaceAt(Math.max(0, width - 12), Y);
-        if (!left || !right) return;
-        const handlers = window.webkit && window.webkit.messageHandlers;
-        const sink = handlers && handlers.\(bandColorsMessageName);
-        if (!sink) return;
-        sink.postMessage({
-          left: left.color,
-          right: right.color,
-          split: Math.max(0, Math.min(Math.round(left.right), width))
-        });
-      };
-      window.\(measureFunctionName) = measure;
-      // 事件一律只排期：一帧内来一百个 transitionend 也只量一次
-      let scheduled = false;
-      const schedule = () => {
-        if (scheduled) return;
-        scheduled = true;
-        requestAnimationFrame(() => { scheduled = false; measure(); });
-      };
-      addEventListener('resize', schedule);
-      addEventListener('transitionend', schedule, true);
-      addEventListener('click', schedule, true);
-      addEventListener('load', () => [0, 300, 1200].forEach((d) => setTimeout(measure, d)));
-    })();
-    """
-
-    // MARK: - WKScriptMessageHandler（注入脚本 → 外链打开 / 横带颜色回报）
+    // MARK: - WKScriptMessageHandler（注入脚本 → 外链打开）
 
     func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        switch message.name {
-        case "openExternal": openExternal(message.body)
-        case Self.bandColorsMessageName:
-            // 解析失败就什么都不做：横带留在窗口底色上，而不是照一个乱数画色
-            if let colors = TopBandColors.parse(message.body) { onBandColors?(colors) }
-        default: break
-        }
+        guard message.name == "openExternal" else { return }
+        openExternal(message.body)
     }
 
     private func openExternal(_ body: Any) {
@@ -278,8 +145,6 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKScriptMessageHa
 
     /// 页面加载完成 —— 健康判定的两个必要条件之一（另一个是最短存活时长）。
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // 导航会把上一份页面连同它的监听一起丢掉，加载完成后重新量一次横带颜色
-        measureTopBand()
         onPageLoaded?()
     }
 }
