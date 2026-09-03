@@ -1,11 +1,30 @@
 import Foundation
 
-/// 一个插件：`id` 是它在 dsh 层级栈里的标识，`bundle` 是把它带进来的 npm 包。
+/// 一个插件：`id` 是它在 dsh 层级栈里的标识，`bundle` 是发现它的那份 patch 所属的 npm 包，
+/// `name` 是这个条目自己声明的包名（patch 行上写了 `name:` 才有）。
 ///
-/// 两者都要留着：禁用要用 id，判断「能不能禁」要看它来自哪个 bundle。
+/// 三者都要留着：禁用要用 id，判断「能不能禁」优先看 `name`、没有才退回 `bundle`
+/// —— 两者不是一回事，原因见 `PluginInventory.isFirstParty(_:)`。
 struct PluginRef: Equatable, Hashable, Sendable {
     let id: String
     let bundle: String
+    let name: String?
+
+    init(id: String, bundle: String, name: String? = nil) {
+        self.id = id
+        self.bundle = bundle
+        self.name = name
+    }
+}
+
+/// patch 文件里的一个条目：`id` 加上它自己声明的包名（写了 `name:` 才有）。
+///
+/// 两个字段必须一起读出来。第三方 bundle 的 patch 里合法地存在「重新配置一个已有条目」
+/// 的行，那个条目可以是第一方的；只读 id 就分不清「这是它自己的插件」和「它在改别人的
+/// 插件」，而这两者在安全模式下的处置正好相反。
+struct PatchEntry: Equatable, Sendable {
+    let id: String
+    let name: String?
 }
 
 /// 静态枚举 profile 里装了哪些插件。
@@ -29,31 +48,77 @@ enum PluginInventory {
 
     private static let patchFileName = "cordis.patch.yml"
 
-    /// 只认 `id:` 这一个键。bundle patch 是 `- insert:` 下的 `- id:/name:`，
+    /// 只认 `id:` 和 `name:` 两个键。bundle patch 是 `- insert:` 下的 `- id:/name:`，
     /// profile patch 是 `- id:/disabled:`——两种形状里 id 行的样子是一样的。
-    private static let idLine = try! NSRegularExpression(pattern: #"^\s*(?:-\s*)?id:\s*(\S.*)$"#)
+    ///
+    /// 分三组：前缀（缩进 + 可能的 `-`，长度就是键所在的列）、键名、值。
+    private static let keyLine = try! NSRegularExpression(pattern: #"^(\s*(?:-\s*)?)(id|name):\s*(\S.*)$"#)
+
+    /// patch 文件里的一行键值。
+    private struct Key {
+        let name: String
+        let value: String
+        /// 键名所在的列。`name:` 归属哪个 `id:` 全靠这个判断。
+        let column: Int
+        /// 行首带 `-`，也就是另起一个条目。
+        let startsEntry: Bool
+    }
 
     // MARK: - 解析
 
-    /// 从一份 patch YAML 文本里抽出插件 id，保持出现顺序、去重。
+    /// 从一份 patch YAML 文本里抽出条目，保持出现顺序，**不去重**。
     ///
-    /// 手写正则而不是引 YAML 解析器：这里只需要一个键，而项目刻意保持零外部依赖。
+    /// 手写正则而不是引 YAML 解析器：这里只需要两个键，而项目刻意保持零外部依赖。
     /// 代价是遇到奇异写法（流式序列、锚点）会漏读；漏读的后果是那个插件在安全模式下
-    /// 仍然启用，属于保守的失败方向——不会误禁用、更不会写坏配置。
-    static func ids(inPatch text: String) -> [String] {
-        var result: [String] = []
-        var seen = Set<String>()
+    /// 仍然启用，属于保守的失败方向——不会写坏配置。
+    ///
+    /// `name:` 认列不认顺序：与前一个 `id:` 键**同列**、且行首没有 `-`（有 `-` 就是另
+    /// 一个条目了）的那个 `name:`，才是这个条目的名字。这条规则的作用是挡住嵌在
+    /// `config:` 里的 `name:` ——它缩进更深，列不同。缩进写法古怪时读不到名字，
+    /// 退化成「只有 id」，也就是这条规则加进来之前的行为。
+    static func entries(inPatch text: String) -> [PatchEntry] {
+        var result: [PatchEntry] = []
+        // 正在等 `name:` 的条目：它在 result 里的下标，以及它的 `id:` 所在的列。
+        var open: (index: Int, column: Int)?
+
         for rawLine in text.components(separatedBy: .newlines) {
-            let line = stripComment(rawLine)
-            guard !line.isEmpty,
-                  let match = idLine.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
-                  let range = Range(match.range(at: 1), in: line)
-            else { continue }
-            let id = unquote(String(line[range]).trimmingCharacters(in: .whitespaces))
-            guard !id.isEmpty, seen.insert(id).inserted else { continue }
-            result.append(id)
+            guard let key = key(in: stripComment(rawLine)) else { continue }
+            guard key.name == "id" else {
+                // 同列、且不另起条目的 name:，属于刚才那个 id；只认第一个。
+                guard let slot = open, slot.column == key.column, !key.startsEntry else { continue }
+                result[slot.index] = PatchEntry(id: result[slot.index].id, name: key.value)
+                open = nil
+                continue
+            }
+            result.append(PatchEntry(id: key.value, name: nil))
+            open = (index: result.count - 1, column: key.column)
         }
         return result
+    }
+
+    /// 从一份 patch YAML 文本里抽出插件 id，保持出现顺序、去重。
+    static func ids(inPatch text: String) -> [String] {
+        var seen = Set<String>()
+        return entries(inPatch: text).map(\.id).filter { seen.insert($0).inserted }
+    }
+
+    /// 读出一行里的 `id:` / `name:`；其他键（`disabled:`、`config:` 等）返回 nil。
+    private static func key(in line: String) -> Key? {
+        guard !line.isEmpty,
+              let match = keyLine.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+              let prefixRange = Range(match.range(at: 1), in: line),
+              let nameRange = Range(match.range(at: 2), in: line),
+              let valueRange = Range(match.range(at: 3), in: line)
+        else { return nil }
+        let value = unquote(String(line[valueRange]).trimmingCharacters(in: .whitespaces))
+        guard !value.isEmpty else { return nil }
+        let prefix = line[prefixRange]
+        return Key(
+            name: String(line[nameRange]),
+            value: value,
+            column: prefix.count,
+            startsEntry: prefix.contains("-")
+        )
     }
 
     /// 去掉整行注释与行尾注释。
@@ -73,9 +138,26 @@ enum PluginInventory {
         return value
     }
 
-    /// bundle 是否第一方。
+    /// npm 包名是否落在第一方 scope 里。
     static func isFirstParty(bundle: String) -> Bool {
         bundle.hasPrefix(firstPartyScope)
+    }
+
+    /// 这个条目是否第一方。
+    ///
+    /// **先看条目自己声明的 `name:`，只有没写时才退回它所在的 bundle。** 两者会不一致，
+    /// 而且不是异常写法：第三方 bundle 的 patch 里合法地存在「重新配置一个第一方条目」
+    /// 的行——实测 `@linxin666/dsh-perf` 就用
+    /// `- id: session-persistence-jsonl` / `name: '@deepseek-ai/dsh-session-persistence-jsonl'`
+    /// 给内置的会话持久化插件改了 root 路径。
+    ///
+    /// 只按 bundle 判定的后果是实测出来的，而且是致命的：安全模式把这个第一方条目一起
+    /// 禁掉，`sessionPersistence` 就没人提供了，`dsh-session-checkpoint-policy`、
+    /// `dsh-message-feedback`、`dsh-workspace`、`dsh-session-projection-cache` 四个第一方
+    /// 插件全部卡在 pending，`dsh-host-apiproxy` 又卡在 `workspaceRegistry` 上，
+    /// dsh 报 `plugin tree failed to load` 直接退出——安全模式本身成了启动不了的原因。
+    static func isFirstParty(_ plugin: PluginRef) -> Bool {
+        isFirstParty(bundle: plugin.name ?? plugin.bundle)
     }
 
     // MARK: - 扫描目录
@@ -86,7 +168,26 @@ enum PluginInventory {
     /// 不会整体失败。安全模式是最后一道防线，它自己不能因为环境不全而失效。
     static func scan(profileDirectory: URL) -> [PluginRef] {
         var result: [PluginRef] = []
-        var seen = Set<String>()
+        var index: [String: Int] = [:]
+
+        /// 同一个 id 在多份 patch 里出现时，认第一方的那一次。
+        ///
+        /// 不能简单先到先得：同一个第一方条目往往被一个第三方 bundle 声明了 `name:`、
+        /// 又被另一个只写了 `- id: … / disabled: true`（`@morlay/better-session` 就是这么
+        /// 关掉内置持久化插件的），先到先得的结果取决于 `dsh.profile.bundles` 的排列顺序
+        /// ——那是用户装插件的顺序，我们无从控制。认第一方是唯一与顺序无关的规则，
+        /// 方向也对：宁可漏禁一个第三方插件，不可误禁一个第一方条目。
+        func record(_ entry: PatchEntry, bundle: String) {
+            let ref = PluginRef(id: entry.id, bundle: bundle, name: entry.name)
+            guard let existing = index[entry.id] else {
+                index[entry.id] = result.count
+                result.append(ref)
+                return
+            }
+            if isFirstParty(ref), !isFirstParty(result[existing]) {
+                result[existing] = ref
+            }
+        }
 
         for bundle in bundles(in: profileDirectory) {
             let patch = profileDirectory
@@ -94,16 +195,16 @@ enum PluginInventory {
                 .appendingPathComponent(bundle)
                 .appendingPathComponent(patchFileName)
             guard let text = try? String(contentsOf: patch, encoding: .utf8) else { continue }
-            for id in ids(inPatch: text) where seen.insert(id).inserted {
-                result.append(PluginRef(id: id, bundle: bundle))
+            for entry in entries(inPatch: text) {
+                record(entry, bundle: bundle)
             }
         }
 
-        // profile 自己的 patch 放在最后：bundle 的归属信息更准确，先到先得。
+        // profile 自己的 patch 放在最后：bundle 的归属信息更准确。
         let own = profileDirectory.appendingPathComponent(patchFileName)
         if let text = try? String(contentsOf: own, encoding: .utf8) {
-            for id in ids(inPatch: text) where seen.insert(id).inserted {
-                result.append(PluginRef(id: id, bundle: profileSource))
+            for entry in entries(inPatch: text) {
+                record(entry, bundle: profileSource)
             }
         }
         return result
@@ -146,11 +247,14 @@ enum PluginInventory {
 
     // MARK: - 待禁用清单
 
-    /// 安全模式要禁用的 id：第三方 bundle 带来的插件，去重后排序。
+    /// 安全模式要禁用的 id：第三方条目，去重后排序。
+    ///
+    /// 判定走 `isFirstParty(_:)`（条目自己的 `name:` 优先），不是 `isFirstParty(bundle:)`
+    /// ——差别不是细节，按 bundle 判会误禁第一方条目并让 dsh 起不来。
     ///
     /// 排序是为了 overlay 的内容稳定——同一套插件每次生成的文件应当逐字节相同，
     /// 用户 diff 它时才看得出「这次和上次到底有没有变」。
     static func thirdPartyIDs(in plugins: [PluginRef]) -> [String] {
-        Set(plugins.filter { !isFirstParty(bundle: $0.bundle) }.map(\.id)).sorted()
+        Set(plugins.filter { !isFirstParty($0) }.map(\.id)).sorted()
     }
 }

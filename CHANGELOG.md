@@ -2,6 +2,20 @@
 
 本文件记录 Harness 的版本变更。Release 构建时由 GitHub Actions 读取（`v*` tag 对应的条目），并附加 git 提交生成 release notes。
 
+## [0.3.9] - 2026-09-02
+
+### 修复
+- **在插件市场里点「重启服务」不再画出一屏失败**：服务其实一直好着。dsh 的应用内重启是「先 spawn 一个接班进程、再让原来那个 exit 0 退出」，而我们把「自己那个直接子进程退出了」直接当成「服务失败了」，从不回头看一眼端口——`❌ 服务异常退出：服务进程以 exit 0 退出` 的下一秒，日志里就是接班进程自报的 `dsh web: http://127.0.0.1:3080`。那行就绪行本可以救场，但晋级判断写的是「当前状态是启动中」，此刻状态已经是失败，于是唯一的活口证据被丢掉；接班进程还继承了我们这条管道的写端，所以连 EOF 都不会来，我们一边判它死了一边继续记录它的输出。左上角应用图标菜单里那个「重启服务」（⌘⇧R）一直好使，恰恰是因为它不相信端口上那个监听者，会把所有权抢回来
+- 现在子进程退出后**先核对端口再判失败**：`lsof` 找出监听者、逐个验命令行确认是 dsh、再探一次 HTTP，300 毫秒一轮、最多等 5 秒（实测退出到接班进程开始监听约 1 秒）。核对通过就接管成「已连接到现有服务」，界面上什么都不会发生——`webURL` 是随状态算出来的，`.running` 换成 `.external` 时它一字不变，滚动位置和输入框里打了一半的字都留着。接班进程要是比 5 秒还慢，它自报的那行就绪行会再核对一次并把已经画出去的失败撤掉
+- **⌘Q 照旧不留残留进程**：接管来的接班进程 pid 记进名单，`stop()` 连它自己带整棵子孙树一起收（`ProcessTree.stopTargets`：我们自己 spawn 的那个由 `Process.terminate()` 负责、不进名单，接管来的只有 pid 没有 `Process`，所以它自己必须进）。启动时接管的**外部**实例绝不记进这份名单——那是用户自己在终端里起的 dsh，⌘Q 把它一起杀掉是越权
+- **exit 0 不再念成「服务异常退出」**。原来那句「服务异常退出：服务进程以 exit 0 退出。日志里没有明确的报错。」三句话自相矛盾：既然是异常退出，退出码怎么会是 0，而且报错还找不到。exit 0 说明进程是自己走完退出流程的，单独成一类（`FailureCause.cleanExit`），文案只说它已经停止、端口上也没有新的服务接上来
+- 被接班进程接管的这次「退出」**既不记成失败启动、也不记成成功启动**：记失败会把一次成功的重启往安全模式的连续失败计数上推，记成功又会抹掉前面真实的连续失败。安全模式下则一律不接管——接班进程有没有带上我们那份插件停用 overlay，只有 dsh 自己知道，接管一个可能满载插件的实例、界面上却挂着「已停用插件」的横幅，就是在撒谎；此时报失败反而是诚实的，「重试」走完整重启，overlay 一定生效
+- **安全模式此前一次都没能把 dsh 启动起来，两个原因各自都足以致命。** 它是「插件让 dsh 起不来」时最后一道防线，而这道防线自己起不来的时候，用户看到的只是又一次启动失败
+- **其一：`--patch` 从来没被 dsh 收下过。** 参数原先拼成 `--profile web --port N --no-open --patch <overlay>`，而 dsh 的启动器一碰到第一个它不认识的参数，就把余下的整段转交给被引导的那个 app——`--patch` 排在 `--port` 后面就落到了不认识它的那一侧，dsh 报 `error: unknown option '--patch'` 直接 exit 1。overlay 之所以是组合链的最后一层，是 `--patch` 这个参数本身的语义决定的（*extra patch-list overlay applied after the profile layer*），跟它在命令行上的位置无关：往后放并不会让它「更优先」，只会让它进不去。现在启动器自己的参数（`--profile` / `--patch`）一律排在 profile 那个 app 的参数（`--port` / `--no-open`）之前，顺序由 `ServerArgumentsTests` 逐项钉住
+- **其二：安全模式会把 dsh 内置的会话持久化插件一起禁掉，于是它自己成了启动不了的原因。** 第三方 bundle 的 `cordis.patch.yml` 里合法地存在「重新配置或停用一个已有条目」的行，那个条目可以是第一方的——实测 `@linxin666/dsh-web-ui-all` 就用 `- id: session-persistence-jsonl` / `name: '@deepseek-ai/dsh-session-persistence-jsonl'` 给内置插件改了 `root` 路径（dsh 自己在合成配置里把这行标注为 `# == @deepseek-ai/dsh-base, patched by @linxin666/dsh-web-ui-all`，也就是说它清楚这是第一方条目）。旧判据只看「这行出现在哪个 bundle 里」，于是把它连坐成第三方并写进停用清单；而另一个第三方 bundle `@morlay/better-session` 本来就停用了这个内置插件、换上自己的 sqlite 实现，安全模式把替代品（正确地）停掉之后，`sessionPersistence` 这个服务就彻底没人提供了：`dsh-session-checkpoint-policy`、`dsh-message-feedback`、`dsh-workspace`、`dsh-session-projection-cache` 全部卡在 pending，`dsh-host-apiproxy` 又卡在 `workspaceRegistry` 上，dsh 报 `plugin tree failed to load: 5 entries did not activate` 并在一两秒内退出
+- 现在判定**先看条目自己声明的 `name:`，没写才退回它所在的 bundle**；`name:` 归属哪个 `id:` 按键所在的列判断（同列、且行首没有 `-`），这样嵌在 `config:` 里的 `name:` 不会被认成条目名。同一个 id 在多份 patch 里出现时**认第一方的那一次**，而不是先到先得——`dsh.profile.bundles` 的排列就是用户装插件的顺序，我们无从控制，先到先得等于让启动成败取决于装插件的先后。方向也是选定的：宁可漏禁一个第三方插件，不可误禁一个第一方条目。用产品自己的扫描器读真实 profile 实测，40 个 id 从「40 个全禁」变成「禁 39、留 1」，留下的正是 `session-persistence-jsonl`；再用捆绑的 dsh 带这份 overlay 真启动一次，五个原先 pending 的第一方插件全部激活、HTTP 返回 200，合成配置里 39 个 id 中在插件树上真实存在的 27 个全部 `disabled: true`（余下 12 个 `ui-skin-*` 本来就不在树上，dsh 只警告一句，且用户自己的 profile patch 里也照样列着它们）
+- **退出应用时日志不再撒谎。** ⌘Q 也会经过关窗，而且排在 `stop()` 之后，于是「停止服务…」下面紧跟着一句「服务继续在后台运行」——比不写这行更糟。现在退出路径上这句不再输出（`ServerManager.isQuitting` 由两个终止钩子置上，`stop()` 自己不置，因为 ⌘⇧R 重启也走 `stop()`，那不是退出）
+
 ## [0.3.8] - 2026-09-02
 
 ### 变更

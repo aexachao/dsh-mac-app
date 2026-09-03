@@ -38,16 +38,32 @@ struct ServerArgumentsTests {
         #expect(args.contains("--no-open"))
     }
 
-    @Test func appliesTheOverlayAsTheLastLayer() {
-        // overlay 是组合链的最后一层：越靠后越优先，「停用插件」必须压过 profile 自己的配置
+    @Test func overlayFlagPrecedesTheProfileAppFlags() {
+        // dsh 的启动器一碰到第一个它不认识的参数（`--port` 属于 web app 自己），就把余下的
+        // 整段转交给被引导的 app。`--patch` 排在 `--port` 之后就落到不认识它的那一侧，
+        // 实测报 `error: unknown option '--patch'` 并 exit 1 —— 安全模式因此一次都没成功过。
         let args = ServerArguments.spawn(bootJS: "/cache/lib/bin.js", port: 3080,
                                         overlay: "/support/Harness/safe-mode.yml")
-        guard let patch = args.firstIndex(of: "--patch") else {
-            Issue.record("缺少 --patch")
+        guard let patch = args.firstIndex(of: "--patch"),
+              let profile = args.firstIndex(of: "--profile"),
+              let port = args.firstIndex(of: "--port"),
+              let noOpen = args.firstIndex(of: "--no-open") else {
+            Issue.record("缺少必需参数：\(args)")
             return
         }
         #expect(args[args.index(after: patch)] == "/support/Harness/safe-mode.yml")
-        #expect(patch > args.firstIndex(of: "--profile")!)
+        #expect(patch > profile)
+        #expect(patch < port)
+        #expect(patch < noOpen)
+    }
+
+    @Test func safeModeArgumentOrderIsExact() {
+        // 顺序本身就是这里唯一会出错的东西，所以整条命令行逐项钉住
+        let args = ServerArguments.spawn(bootJS: "/cache/lib/bin.js", port: 3080,
+                                        overlay: "/support/Harness/safe-mode.yml")
+        #expect(args == ["/cache/lib/bin.js", "--profile", "web",
+                         "--patch", "/support/Harness/safe-mode.yml",
+                         "--port", "3080", "--no-open"])
     }
 
     @Test func omitsPatchWhenNotInSafeMode() {

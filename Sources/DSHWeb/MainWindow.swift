@@ -65,8 +65,22 @@ final class MainWindow: NSObject, NSWindowDelegate {
 
     // MARK: - NSWindowDelegate
 
-    /// 关窗留一行日志：不写的话，用户过后发现 node 还在跑，只会以为应用没退干净。
+    /// 关窗时要写进日志的那行；退出路径上返回 nil。
+    ///
+    /// 不写的话，用户过后发现 node 还在跑，只会以为应用没退干净。但 ⌘Q 也会走到关窗，
+    /// 而且是在 `stop()` 之后 —— 那时候日志里已经有「停止服务…」，紧跟一句
+    /// 「服务继续在后台运行」是把真相说反了，比不写更糟。
+    ///
+    /// 拆成纯函数是为了能钉在测试里：两条路径的区别只体现在日志文本上，
+    /// 编译期与界面上都看不出来。日志行按惯例不进 `Strings`（单语，便于和 dsh 自己的
+    /// 输出一起贴进 issue 里比对）。
+    static func closeLogLine(isQuitting: Bool) -> String? {
+        guard !isQuitting else { return nil }
+        return "[dsh-web] 窗口已关闭，服务继续在后台运行（⌘Q 退出应用并停止服务）。"
+    }
+
     func windowWillClose(_ notification: Notification) {
-        ServerManager.shared.log("[dsh-web] 窗口已关闭，服务继续在后台运行（⌘Q 退出应用并停止服务）。")
+        guard let line = Self.closeLogLine(isQuitting: ServerManager.shared.isQuitting) else { return }
+        ServerManager.shared.log(line)
     }
 }

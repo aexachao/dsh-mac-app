@@ -46,6 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // 先立旗再停服务：`.terminateNow` 之后 AppKit 才去关窗，`MainWindow.windowWillClose`
+        // 于是排在「停止服务…」后面。没有这面旗，它会紧跟着补一句「服务继续在后台运行」。
+        ServerManager.shared.noteQuitting()
         ServerManager.shared.stop()
         ServerManager.shared.closeLogFile()
         return .terminateNow
@@ -53,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // 兜底（如系统关机），保证不留孤儿进程、且最后几行日志已落盘
+        ServerManager.shared.noteQuitting()
         ServerManager.shared.stop()
         ServerManager.shared.closeLogFile()
     }

@@ -39,6 +39,18 @@ final class ServerManager {
     /// 是用户机器上的状态。
     private(set) var runtimeSource: RuntimeSource?
 
+    /// 应用正在退出。
+    ///
+    /// 退出路径上服务是真的会停的，而 AppKit 关窗发生在 `stop()` 之后，
+    /// `MainWindow` 那句「服务继续在后台运行」到那时已经是假话。
+    /// 只由 `AppDelegate` 的两个终止钩子置上——`stop()` 自己不置，
+    /// 因为 ⌘⇧R 重启也走 `stop()`，那不是退出。
+    private(set) var isQuitting = false
+
+    func noteQuitting() {
+        isQuitting = true
+    }
+
     /// 界面用的就绪地址（由状态推导）。
     var webURL: URL? {
         switch state {
@@ -62,6 +74,20 @@ final class ServerManager {
     private let safeMode: SafeModeStore
     /// 「改用本机 dsh」逃生开关（默认关闭，见 `MachineRuntimePreference`）。
     private let machineRuntime: MachineRuntimePreference
+
+    /// 接管过来的接班进程 pid（dsh 自己重启时留下的那一个）。
+    ///
+    /// 只记「我们自己的子进程退出后接管的接班进程」，绝不记 `adoptExternalService`
+    /// 接管的外部实例：那个是用户自己在终端里起的 dsh，⌘Q 把它一起杀掉是越权。
+    private var adoptedPIDs: [Int32] = []
+
+    /// 正在核对接班进程。两件事都要它：核对是异步的，期间那个 500ms 的健康轮询不能
+    /// 抢先把这次退出记成一次失败启动；两条触发路径也可能同时到，不必重复轮询。
+    private var isAdoptingSuccessor = false
+
+    /// 每次 `stop()` 递增。核对接班进程要等几秒，期间用户可能按了 ⌘⇧R 或 ⌘Q——那之后
+    /// 再接管就是错的（会和新起的服务撞成两个），所以每次 await 回来都对一次表。
+    private var stopGeneration = 0
 
     // MARK: - 启动入口
 
@@ -96,6 +122,32 @@ final class ServerManager {
         }
     }
 
+    /// 端口上监听者的核对结果。
+    private enum ListenerCheck {
+        case none
+        case notDSH(pids: [Int])
+        case notResponding(pids: [Int])
+        case responding(pids: [Int])
+    }
+
+    /// 核对端口上的监听者：有没有人、是不是 dsh、响不响应 HTTP。
+    ///
+    /// lsof/ps 是毫秒级查询，且只在端口确实被占用时才会走到。不用
+    /// `DSHProcessIdentity.dshListenerPIDs`：`.notDSH` 那条日志要点名占用者，
+    /// 而那个函数只返回过滤后的集合，复用它就得多跑一次 lsof。
+    private func checkListeners(on candidate: Int) async -> ListenerCheck {
+        let listeners = DSHProcessIdentity.listenerPIDs(on: candidate)
+        guard !listeners.isEmpty else { return .none }
+
+        let dshPIDs = listeners.filter { pid in
+            guard let command = DSHProcessIdentity.commandLine(pid: pid) else { return false }
+            return DSHProcessIdentity.isDSHBoot(commandLine: command)
+        }
+        guard !dshPIDs.isEmpty else { return .notDSH(pids: listeners) }
+        guard await probePort(candidate) else { return .notResponding(pids: dshPIDs) }
+        return .responding(pids: dshPIDs)
+    }
+
     /// 尝试接管端口上已有的服务。
     ///
     /// 只有确认监听方确实是 dsh 才接管——否则会把用户其它本地服务的页面加载进应用窗口。
@@ -103,29 +155,64 @@ final class ServerManager {
     /// 让界面卡在一个可能已经僵死的进程上。
     /// - Returns: 已接管并进入 `.external` 时为 true。
     private func adoptExternalService(on candidate: Int) async -> Bool {
-        // lsof/ps 是毫秒级查询，且只在端口确实被占用时才会走到。
-        let listeners = DSHProcessIdentity.listenerPIDs(on: candidate)
-        guard !listeners.isEmpty else { return false }
-
-        let dshPIDs = listeners.filter { pid in
-            guard let command = DSHProcessIdentity.commandLine(pid: pid) else { return false }
-            return DSHProcessIdentity.isDSHBoot(commandLine: command)
-        }
-        guard !dshPIDs.isEmpty else {
-            log("[dsh-web] 端口 \(candidate) 被非 dsh 进程占用（\(describe(listeners))），改用其它端口。")
+        switch await checkListeners(on: candidate) {
+        case .none:
             return false
-        }
-        guard await probePort(candidate) else {
+        case .notDSH(let pids):
+            log("[dsh-web] 端口 \(candidate) 被非 dsh 进程占用（\(describe(pids))），改用其它端口。")
+            return false
+        case .notResponding:
             log("[dsh-web] 端口 \(candidate) 上的 dsh 进程尚未响应，改为自行启动服务。")
             return false
+        case .responding(let pids):
+            port = candidate
+            state = .external(port: candidate)
+            log("[dsh-web] 检测到 127.0.0.1:\(candidate) 已有 dsh 服务（\(describe(pids))），直接连接。")
+            return true
         }
-        port = candidate
-        state = .external(port: candidate)
-        log("[dsh-web] 检测到 127.0.0.1:\(candidate) 已有 dsh 服务（\(describe(dshPIDs))），直接连接。")
-        return true
     }
 
-    /// 停止服务进程连同它派生出来的整棵子孙树（退出/重试前调用）。
+    /// 我们那个子进程退出后，看端口上有没有「接班的」——有就接管，别报失败。
+    ///
+    /// dsh 在应用内重启（插件市场里那个「重启服务」）就是这个形状：它先 spawn 一个接班
+    /// 进程，再让原来那个 exit 0 退出。接班进程继承了我们这条管道的写端，所以连 EOF 都
+    /// 不会来——服务一直在，只有我们以为它死了。实测日志里「❌ 服务异常退出」的下一秒，
+    /// 就是接班进程自报的 `dsh web: http://127.0.0.1:3080`。
+    ///
+    /// 轮询而不是探一次：退出与接班进程开始监听之间有约 1s 的空窗。
+    ///
+    /// 安全模式下不接管，理由同 `start()`：接班进程是不是也带着我们那份 overlay，只有
+    /// dsh 自己知道；接管一个可能满载插件的实例，界面却挂着「已停用插件」的横幅，就是
+    /// 在撒谎。此时报失败反而是诚实的——「重试」走完整重启，overlay 一定生效。
+    /// - Returns: 已接管并进入 `.external` 时为 true。
+    private func adoptSuccessor() async -> Bool {
+        guard !shouldUseSafeMode, !isAdoptingSuccessor else { return false }
+        isAdoptingSuccessor = true
+        defer { isAdoptingSuccessor = false }
+
+        let generation = stopGeneration
+        let deadline = Date().addingTimeInterval(Self.successorGraceSeconds)
+        while true {
+            let check = await checkListeners(on: port)
+            // 期间用户按了 ⌘⇧R 或 ⌘Q：那之后端口上的东西已经不该由我们接管了。
+            guard generation == stopGeneration else { return false }
+            if case .responding(let pids) = check {
+                adoptedPIDs = pids.map(pid_t.init)
+                state = .external(port: port)
+                log("[dsh-web] 服务进程已换成新的（\(describe(pids))）——dsh 自己重启了，继续连接 127.0.0.1:\(port)。")
+                return true
+            }
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(300))
+            guard generation == stopGeneration else { return false }
+        }
+    }
+
+    /// 等接班进程的上限。实测退出到接班进程开始监听约 1s，5s 是三倍余量；
+    /// 真没人接班时，失败判定就晚这么多。
+    private static let successorGraceSeconds: TimeInterval = 5
+
+    /// 停止服务进程连同它派生出来的整棵进程树（退出/重试前调用）。
     ///
     /// 只 terminate 直接子进程收不干净：dsh 的插件会自己 spawn 常驻进程（实测
     /// dsh-doctor 的 supervisor 连 SIGTERM 都不理），node 一死它们被 launchd 收养，
@@ -134,28 +221,39 @@ final class ServerManager {
     /// **名单必须在杀父进程之前抓**：父进程一退出，子孙的 PPID 全变成 1，那棵树就
     /// 再也认不出来了——那时候只剩「按命令行猜哪个是我们的」，而那正是我们要避免的。
     ///
+    /// 接管来的接班进程（`adoptedPIDs`）连同它的子孙一起收：它不是我们的直接子进程，
+    /// 但是我们派生出来的进程派生出来的，⌘Q 不收它就留下一个占着端口的孤儿。
+    ///
     /// 同步执行（含最长 `stopGraceSeconds` 的等待）：两个终止钩子都是同步的，
     /// 起 Task 轮不到执行就随进程一起没了。
     func stop() {
-        guard let process else { return }
-        let root = process.processIdentifier
-        let descendants = ProcessTree.descendants(of: root)
+        // 在 guard 之前递增：接班进程的核对期里 `process` 是 nil、`adoptedPIDs` 还空着，
+        // 这一路会从下面的 guard 早退，但「已经停过一次」这件事必须留下痕迹——否则
+        // ⌘⇧R 会在正要被接管的那个服务旁边再起一个。
+        stopGeneration += 1
 
-        if process.isRunning {
+        let own = process
+        let adopted = adoptedPIDs
+        guard own != nil || !adopted.isEmpty else { return }
+
+        let targets = ProcessTree.stopTargets(own: own?.processIdentifier, adopted: adopted)
+
+        if own?.isRunning == true || !adopted.isEmpty {
             log("[dsh-web] 停止服务…")
         }
         // 先摘掉引用再终止：terminationHandler 靠 `self.process === p` 判断这次退出
         // 是不是我们主动要的，摘早了才不会把一次正常停止报成启动失败。
         self.process = nil
-        if process.isRunning {
-            process.terminate()
+        self.adoptedPIDs = []
+        if let own, own.isRunning {
+            own.terminate()
         }
 
-        guard !descendants.isEmpty else { return }
-        log("[dsh-web] 一并终止 \(descendants.count) 个由服务派生的子孙进程（\(describe(descendants.map(Int.init)))）。")
-        let forced = ProcessTree.terminate(descendants, grace: Self.stopGraceSeconds)
+        guard !targets.isEmpty else { return }
+        log("[dsh-web] 一并终止 \(targets.count) 个由服务派生的进程（\(describe(targets.map(Int.init)))）。")
+        let forced = ProcessTree.terminate(targets, grace: Self.stopGraceSeconds)
         if !forced.isEmpty {
-            log("[dsh-web] \(forced.count) 个子孙进程在 \(Self.stopGraceSeconds)s 内未退出，已强制终止（\(describe(forced.map(Int.init)))）。")
+            log("[dsh-web] \(forced.count) 个进程在 \(Self.stopGraceSeconds)s 内未退出，已强制终止（\(describe(forced.map(Int.init)))）。")
         }
     }
 
@@ -374,8 +472,24 @@ final class ServerManager {
             Task { @MainActor in
                 guard let self, self.process === p else { return }
                 self.process = nil
+                let status = p.terminationStatus
+                let generation = self.stopGeneration
+
+                // 先问「端口上是不是有接班的」再判失败。dsh 在应用内重启时就是这个形状：它
+                // spawn 一个接班进程、让原来这个 exit 0 退出，而接班进程继承了我们这条管道的
+                // 写端，所以连 EOF 都不会来——服务一直在，只有我们以为它死了。
+                if await self.adoptSuccessor() {
+                    // 这次「退出」既不是失败启动也不是成功启动：记 `.unhealthy` 会把一次成功
+                    // 的重启推向安全模式，记 `.healthy` 又会抹掉前面真实的连续失败。两边都不记。
+                    self.abandonHealthObservation()
+                    return
+                }
+                // 核对期间用户按了 ⌘⇧R / ⌘Q：那之后已经有别的路径接手，
+                // 这里再画一屏失败会盖在一个正在启动的服务上。
+                guard generation == self.stopGeneration else { return }
+
                 self.observation?.exitedAt = Date()
-                self.observation?.exitStatus = p.terminationStatus
+                self.observation?.exitStatus = status
                 self.settleHealth()
                 // 从日志尾部推断真正的原因：dsh 拒绝启动时会把理由写在退出前的最后几行，
                 // 只报 exit code 等于把唯一有用的线索丢掉。
@@ -383,7 +497,7 @@ final class ServerManager {
                 // 带上运行时事实：同一条「配置格式不符」在捆绑运行时下是我们的版本与用户
                 // `~/.dsh` 错位（该推逃生开关），在本机运行时下才是配置本身的问题。
                 self.fail(FailureCause.classify(
-                    exitStatus: p.terminationStatus,
+                    exitStatus: status,
                     logTail: Array(self.logLines.suffix(Self.classificationTailLines)),
                     runtime: self.runtimeContext()
                 ))
@@ -467,6 +581,9 @@ final class ServerManager {
     /// 幂等：落定后清掉 `observation`。退出回调与轮询任务会同时到达，不清就会重复计数，
     /// 一次失败启动能把连续失败次数推进两三格，安全模式随之误触发。
     private func settleHealth() {
+        // 接班进程正在核对：这次退出到底算什么还没定，现在落定只会落错——而且
+        // **不能清掉 `observation`**，核对失败时这次判定还要照常落地。
+        guard !isAdoptingSuccessor else { return }
         guard let observation else { return }
         let outcome = StartupHealth.evaluate(observation, now: Date(), policy: healthPolicy)
         guard outcome != .pending else { return }
@@ -481,6 +598,16 @@ final class ServerManager {
         case .pending:
             break
         }
+    }
+
+    /// 丢掉本次启动的健康观察，不记任何判定。
+    ///
+    /// 只给「服务被接班进程接管」这一种情形：这次退出既不是失败启动（记 `.unhealthy`
+    /// 会把一次成功的重启推向安全模式），也不是成功启动（记 `.healthy` 会抹掉前面真实
+    /// 的连续失败），唯一诚实的做法是不记。
+    private func abandonHealthObservation() {
+        observation = nil
+        health = .pending
     }
 
     // MARK: - 安全模式
@@ -603,9 +730,22 @@ final class ServerManager {
             for line in lines where !line.isEmpty {
                 self.log(line)
             }
-            if ready, case .starting = self.state {
-                self.state = .running(port: self.port)
-                self.log("[dsh-web] 服务就绪。")
+            if ready {
+                switch self.state {
+                case .starting:
+                    self.state = .running(port: self.port)
+                    self.log("[dsh-web] 服务就绪。")
+                case .failed:
+                    // 兜底：接班进程比 `successorGraceSeconds` 还慢，失败判定已经画出去了。
+                    // 它自己报出就绪行，就说明服务其实好着——核对一次再把那屏失败撤掉。
+                    Task { [weak self] in
+                        guard let self, case .failed = self.state else { return }
+                        guard await self.adoptSuccessor() else { return }
+                        self.log("[dsh-web] 上一条失败判定作废：服务其实一直在。")
+                    }
+                case .running, .external:
+                    break
+                }
             }
         }
     }

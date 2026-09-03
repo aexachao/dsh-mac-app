@@ -31,6 +31,13 @@ enum FailureCause: Equatable {
     /// 这份就读不懂了。此时叫用户去 Finder 里手改 yaml 是把我们的版本问题摊给他，唯一
     /// 靠得住的出路是改用他机器上那份更新的 dsh。
     case runtimeVersionSkew(bundled: String?, path: String, message: String)
+    /// 服务进程正常收尾（exit 0），端口上也没有别的服务接上来。
+    ///
+    /// 与 `.abnormalExit` 分开，因为 exit 0 说明进程是自己走完退出流程的，不是崩了：
+    /// 它可能被外部终止（`kill`、系统注销），也可能是 dsh 自己重启时接班进程没起来。
+    /// 合成一句「服务异常退出：服务进程以 exit 0 退出。日志里没有明确的报错。」的话，
+    /// 文案自己就是矛盾的——既然是异常退出，退出码怎么会是 0，而且报错还找不到。
+    case cleanExit(message: String?)
     /// 其它异常退出；`message` 是日志里能找到的最后一条报错。
     case abnormalExit(status: Int32, message: String?)
 
@@ -97,7 +104,7 @@ enum FailureCause: Equatable {
             return [.viewLogs, .retry]
         case .npxTimeout, .npxUnavailable, .bootJSMissing:
             return [.viewLogs, .exportDiagnostics, .retry]
-        case .spawnFailed, .readinessTimeout, .abnormalExit:
+        case .spawnFailed, .readinessTimeout, .abnormalExit, .cleanExit:
             return [.viewLogs, .exportDiagnostics, .retry]
         }
     }
@@ -135,6 +142,8 @@ enum FailureCause: Equatable {
             return language == .zh ? "配置文件格式不符" : "Invalid configuration file"
         case .runtimeVersionSkew:
             return language == .zh ? "内置的 dsh 版本对不上" : "Bundled dsh version mismatch"
+        case .cleanExit:
+            return language == .zh ? "服务已停止" : "Service stopped"
         case .abnormalExit:
             return language == .zh ? "服务异常退出" : "Service exited unexpectedly"
         }
@@ -194,6 +203,14 @@ enum FailureCause: Equatable {
                 : "The dsh bundled with the app (\(version)) cannot read \(path): \(message). "
                     + "A newer dsh on this machine has most likely rewritten that file — nothing is wrong with your config, "
                     + "and the bundled copy cannot be changed. Turn on “Use the dsh installed on this machine” to start with that one instead."
+        case .cleanExit(let message):
+            // 不写「异常」「报错」：exit 0 的进程是正常收尾的，日志里本来就不该有报错。
+            // 真有报错行才附上——那说明它是先出了错、才自己干净地退出来的。
+            let head = zh
+                ? "服务进程已经正常退出（exit 0），端口上也没有新的 dsh 服务接上来。它可能被手动结束了，也可能是 dsh 重启时新的服务进程没起来。"
+                : "The service process exited normally (exit 0) and nothing took over the port. It may have been stopped by hand, or a dsh restart may have failed to bring its replacement up."
+            guard let message else { return head }
+            return head + (zh ? "退出前的最后一条报错：\(message)" : " Last error before it exited: \(message)")
         case .abnormalExit(let status, let message):
             let tail = message.map { zh ? "最后一条报错：\($0)" : "Last error: \($0)" } ?? (zh ? "日志里没有明确的报错。" : "The log contains no explicit error.")
             return zh
@@ -214,6 +231,7 @@ enum FailureCause: Equatable {
         case .readinessTimeout: return "readinessTimeout"
         case .invalidConfig: return "invalidConfig"
         case .runtimeVersionSkew: return "runtimeVersionSkew"
+        case .cleanExit: return "cleanExit"
         case .abnormalExit(let status, _): return "abnormalExit(\(status))"
         }
     }
@@ -259,6 +277,9 @@ enum FailureCause: Equatable {
     /// `runtime` 决定配置格式错误落到哪一类：只有确知跑的是捆绑那份时才说「版本错位」并
     /// 推荐逃生开关。本机运行时下那个开关已经开着，说不知道时推荐一个可能毫无作用的开关
     /// 比让用户去看文件更糟，所以两种情况都退回 `.invalidConfig`。
+    ///
+    /// 退出码只在最后一步起作用，且只分两类：exit 0 是 `.cleanExit`，其余是 `.abnormalExit`。
+    /// 日志里写明了原因的话，退出码是几都不重要。
     static func classify(
         exitStatus: Int32,
         logTail: [String],
@@ -279,6 +300,10 @@ enum FailureCause: Equatable {
             }
         }
         let message = lines.last { line in errorMarkers.contains(where: line.contains) }
+        // exit 0 单独一类。进程走完了自己的退出流程，把这种情况念成「异常退出」，用户读到的
+        // 就是「服务异常退出：服务进程以 exit 0 退出。日志里没有明确的报错。」——三句话自相
+        // 矛盾。调用方在把这次退出判成失败之前已经确认过端口上没有接班的服务了。
+        if exitStatus == 0 { return .cleanExit(message: message) }
         return .abnormalExit(status: exitStatus, message: message)
     }
 

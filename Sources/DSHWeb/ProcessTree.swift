@@ -80,6 +80,35 @@ enum ProcessTree {
         descendants(of: root, in: snapshot())
     }
 
+    /// 一次 `stop()` 要收拾的全部 pid，深的在前。
+    ///
+    /// 两种所有权混在一起，处理方式不同：`own` 是我们自己 spawn 的那个 node，`Process`
+    /// 还在手上，由 `Process.terminate()` 亲自终止，所以它**不出现在返回值里**，只有它的
+    /// 子孙出现；`adopted` 是 dsh 自己重启后我们接管的接班进程，我们只有 pid、没有
+    /// `Process`，所以它自己也必须在名单里。
+    ///
+    /// 接班进程不是我们的直接子进程——我们那个 node 一退出，它就被 launchd 收养了——但它
+    /// 是我们派生出来的进程派生出来的。⌘Q 不收它，就留下一个占着端口的孤儿，那正是这套
+    /// 清理最初要解决的问题。反过来，`adoptExternalService` 接管的外部实例绝不会走到这里：
+    /// 那是用户自己在终端里起的 dsh，杀它是越权（见 `ServerManager.adoptedPIDs`）。
+    static func stopTargets(
+        own: Int32?, adopted: [Int32], in pairs: [(pid: Int32, ppid: Int32)]
+    ) -> [Int32] {
+        var ordered: [Int32] = []
+        if let own { ordered += descendants(of: own, in: pairs) }
+        for root in adopted where root > 1 {
+            ordered += descendants(of: root, in: pairs) + [root]
+        }
+        // `own` 预先放进 seen，等于把它从名单里剔掉：它由 `Process.terminate()` 负责。
+        var seen: Set<Int32> = own.map { [$0] } ?? []
+        return ordered.filter { seen.insert($0).inserted }
+    }
+
+    /// 同上，现场读一次进程表。
+    static func stopTargets(own: Int32?, adopted: [Int32]) -> [Int32] {
+        stopTargets(own: own, adopted: adopted, in: snapshot())
+    }
+
     /// 先对全体发 SIGTERM，等一小段，再对仍在的补 SIGKILL；返回被强杀的那些 pid。
     ///
     /// 两级是必须的：实测那个 supervisor 完全不理 SIGTERM，只发一次「礼貌信号」

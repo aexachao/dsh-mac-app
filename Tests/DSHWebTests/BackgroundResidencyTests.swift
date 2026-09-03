@@ -37,6 +37,21 @@ struct BackgroundResidencyTests {
         #expect(window.isReleasedWhenClosed == false)
     }
 
+    // MARK: - 关窗日志分两条路径
+
+    @Test func closingTheWindowSaysTheServiceKeepsRunning() throws {
+        // 不留这一行，用户过后发现 node 还在跑，只会以为应用没退干净
+        let line = try #require(MainWindow.closeLogLine(isQuitting: false))
+        #expect(line.contains("后台"))
+        #expect(line.contains("⌘Q"))
+    }
+
+    @Test func quittingDoesNotClaimTheServiceKeepsRunning() {
+        // ⌘Q 也会走到关窗，而且是在 stop() 之后：那时日志里已经有「停止服务…」，
+        // 紧跟一句「服务继续在后台运行」是把真相说反了，比不写更糟
+        #expect(MainWindow.closeLogLine(isQuitting: true) == nil)
+    }
+
     // MARK: - 窗口菜单里的两个入口
 
     @Test func windowMenuOffersCloseAndReopen() throws {

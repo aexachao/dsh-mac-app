@@ -65,6 +65,51 @@ struct FailureCauseTests {
         #expect(cause == .abnormalExit(status: 1, message: nil))
     }
 
+    // MARK: exit 0 是自己走完退出流程的，不是崩了
+    //
+    // 出厂那版把它也念成「异常退出」，用户读到的整句是「服务异常退出：服务进程以 exit 0
+    // 退出。日志里没有明确的报错。」——既然是异常退出，退出码怎么会是 0，报错还找不到。
+    // 用户报告里的 `failed(abnormalExit(0))` 就是这个。
+
+    @Test func exitZeroIsNotAnAbnormalExit() {
+        let cause = FailureCause.classify(exitStatus: 0, logTail: [
+            "[12:00:00] [dsh-web] 服务进程已启动 (PID 123)",
+        ])
+        #expect(cause == .cleanExit(message: nil))
+        #expect(cause != .abnormalExit(status: 0, message: nil))
+    }
+
+    @Test func exitZeroDetailDoesNotContradictItself() {
+        let cause = FailureCause.classify(exitStatus: 0, logTail: [])
+        #expect(!cause.detail(.zh).contains("异常"))
+        #expect(!cause.detail(.zh).contains("没有明确的报错"))
+        #expect(!cause.detail(.en).lowercased().contains("unexpected"))
+        #expect(!cause.title(.zh).contains("异常"))
+    }
+
+    @Test func exitZeroIdentifierIsItsOwnCategory() {
+        // 诊断报告里出现的就是这个字符串（`failed(abnormalExit(0))` 曾经是它）
+        #expect(FailureCause.classify(exitStatus: 0, logTail: []).identifier == "cleanExit")
+    }
+
+    @Test func cleanExitStillCarriesTheLastErrorLineIfThereIsOne() {
+        // exit 0 之前也可能先出过错——那说明它是出错后自己干净地退出来的
+        let cause = FailureCause.classify(exitStatus: 0, logTail: [
+            "[12:00:01] Error: cannot find module 'foo'",
+        ])
+        #expect(cause == .cleanExit(message: "Error: cannot find module 'foo'"))
+        #expect(cause.detail(.zh).contains("Error: cannot find module 'foo'"))
+    }
+
+    @Test func configRejectionStillWinsOverExitZero() {
+        // 日志里写明了原因，退出码是几都不重要
+        let cause = FailureCause.classify(exitStatus: 0, logTail: skewLog)
+        guard case .invalidConfig = cause else {
+            Issue.record("日志写明的配置错误应优先于退出码，实际为 \(cause)")
+            return
+        }
+    }
+
     // MARK: 捆绑运行时与 ~/.dsh 的版本错位
     //
     // 捆绑之后多出来的一整类失败：我们发的 dsh 是定版的，而 `~/.dsh` 是用户和别的 dsh
@@ -162,6 +207,7 @@ struct FailureCauseTests {
                             path: "/Users/me/.dsh/.credentials.yaml",
                             message: "must be a string"),
         .abnormalExit(status: 1, message: "Error: boom"),
+        .cleanExit(message: nil),
     ]
 
     @Test func everyCauseHasBilingualTitleAndDetail() {

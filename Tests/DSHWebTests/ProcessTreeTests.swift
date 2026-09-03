@@ -116,4 +116,69 @@ struct ProcessTreeTests {
         #expect(ProcessTree.terminate([], grace: 0.1).isEmpty)
         #expect(ProcessTree.terminate([0, 1], grace: 0.1).isEmpty)
     }
+
+    // MARK: - stopTargets：自己 spawn 的 vs 接管过来的
+
+    @Test("自己 spawn 的那个不进名单，它的子孙进")
+    func ownProcessIsNotATarget() {
+        let pairs: [(pid: Int32, ppid: Int32)] = [
+            (100, 1),      // 我们自己的 node
+            (200, 100),    // 插件派生的常驻进程
+            (300, 200),
+        ]
+        let targets = ProcessTree.stopTargets(own: 100, adopted: [], in: pairs)
+        // 100 由 `Process.terminate()` 亲自终止，重复发信号没坏处，但名单里出现它
+        // 就意味着我们在用 pid 杀一个手上还有 `Process` 的进程，那是两套所有权混用
+        #expect(!targets.contains(100))
+        #expect(targets == [300, 200])
+    }
+
+    @Test("接管过来的接班进程自己也在名单里，且排在它的子孙之后")
+    func adoptedRootIsItselfATarget() {
+        let pairs: [(pid: Int32, ppid: Int32)] = [
+            (500, 1),      // 接班进程（我们那个 node 死后被 launchd 收养）
+            (600, 500),
+            (700, 600),
+        ]
+        let targets = ProcessTree.stopTargets(own: nil, adopted: [500], in: pairs)
+        // 我们只有 pid、没有 `Process`，所以它自己也必须被 kill
+        #expect(targets == [700, 600, 500])
+    }
+
+    @Test("自己那个和接管的那个可以同时存在，各自成树")
+    func ownAndAdoptedCoexist() {
+        let pairs: [(pid: Int32, ppid: Int32)] = [
+            (100, 1), (200, 100),
+            (500, 1), (600, 500),
+        ]
+        let targets = ProcessTree.stopTargets(own: 100, adopted: [500], in: pairs)
+        #expect(targets == [200, 600, 500])
+    }
+
+    @Test("同一个 pid 只出现一次：接管的那个恰好还是我们的子孙时不重复发信号")
+    func deduplicatesOverlappingTrees() {
+        let pairs: [(pid: Int32, ppid: Int32)] = [
+            (100, 1),
+            (200, 100),    // 既是 own 的子孙，又被当作接管根传进来
+            (300, 200),
+        ]
+        let targets = ProcessTree.stopTargets(own: 100, adopted: [200], in: pairs)
+        #expect(targets == [300, 200])
+        #expect(targets.count == Set(targets).count)
+    }
+
+    @Test("接管名单里的 0/1 一律忽略——一次参数失误不该变成杀掉整台机器")
+    func refusesInitAsAdoptedRoot() {
+        let pairs: [(pid: Int32, ppid: Int32)] = [(100, 1), (200, 100), (300, 0)]
+        #expect(ProcessTree.stopTargets(own: nil, adopted: [1], in: pairs).isEmpty)
+        #expect(ProcessTree.stopTargets(own: nil, adopted: [0], in: pairs).isEmpty)
+    }
+
+    @Test("两边都没有时返回空")
+    func nothingToStop() {
+        let pairs: [(pid: Int32, ppid: Int32)] = [(100, 1), (200, 100)]
+        #expect(ProcessTree.stopTargets(own: nil, adopted: [], in: pairs).isEmpty)
+        // 独苗一个 own：它自己由 `Process.terminate()` 负责，名单确实该是空的
+        #expect(ProcessTree.stopTargets(own: 200, adopted: [], in: pairs).isEmpty)
+    }
 }
